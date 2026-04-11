@@ -30,6 +30,7 @@ try:
     from anomaly_detector.zscore_detector import ZScoreDetector, TimeInterval
     from anomaly_detector.isolation_forest_detector import IsolationForestDetector
     from anomaly_detector.feature_extractor import FeatureExtractor
+    from anomaly_detector.path_utils import normalize_path, validate_file_path
 except ImportError:
     print("错误：无法导入 anomaly_detector 模块")
     print("请确保 anomaly_detector 模块在技能目录下")
@@ -64,7 +65,7 @@ def load_data(
     加载数据文件
     
     Args:
-        file_path: 文件路径
+        file_path: 文件路径（支持跨平台格式：~、\\、/ 等）
         column: 要检测的列名
         sheet: Excel 工作表名称
         timestamp_column: 时间戳列名（可选，不指定则自动检测）
@@ -72,19 +73,21 @@ def load_data(
     Returns:
         DataFrame 包含时间戳和目标列
     """
-    path = Path(file_path)
+    # Normalize path for cross-platform compatibility
+    normalized_path = normalize_path(file_path)
+    path = Path(normalized_path)
     
     if not path.exists():
-        raise FileNotFoundError(f"文件不存在: {file_path}")
+        raise FileNotFoundError(f"文件不存在: {normalized_path}")
     
     # 根据文件扩展名读取
     if path.suffix.lower() == '.csv':
-        df = pd.read_csv(file_path)
+        df = pd.read_csv(normalized_path)
     elif path.suffix.lower() in ['.xlsx', '.xls']:
         if sheet:
-            df = pd.read_excel(file_path, sheet_name=sheet)
+            df = pd.read_excel(normalized_path, sheet_name=sheet)
         else:
-            df = pd.read_excel(file_path)
+            df = pd.read_excel(normalized_path)
     else:
         raise ValueError(f"不支持的文件格式: {path.suffix}")
     
@@ -325,9 +328,11 @@ def save_output(anomalies: List[Dict], output_path: str):
     
     Args:
         anomalies: 异常列表
-        output_path: 输出文件路径
+        output_path: 输出文件路径（支持跨平台格式）
     """
-    path = Path(output_path)
+    # Normalize output path for cross-platform compatibility
+    normalized_path = normalize_path(output_path)
+    path = Path(normalized_path)
     
     # 转换异常为可序列化格式
     serializable_anomalies = []

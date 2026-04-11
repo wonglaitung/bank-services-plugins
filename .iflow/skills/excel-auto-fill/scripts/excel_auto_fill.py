@@ -23,6 +23,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 try:
     from excel_auto_fill.skill import excel_auto_fill, FillResult
+    from excel_auto_fill.path_utils import normalize_path, normalize_output_path
 except ImportError:
     print("错误：无法导入 excel_auto_fill 模块")
     print("请确保 excel_auto_fill 目录在技能目录下")
@@ -52,14 +53,16 @@ def parse_data_input(data_str: str) -> Union[str, Dict[str, Any]]:
     解析数据输入
     
     支持格式：
-    - JSON 文件路径
+    - JSON 文件路径（支持跨平台格式：~、\\、/ 等）
     - JSON 字符串
     - 键值对文本（name: value）
     """
     # 检查是否为文件路径
     data_path = Path(data_str)
     if data_path.exists():
-        with open(data_path, 'r', encoding='utf-8') as f:
+        # Normalize path for cross-platform compatibility
+        normalized_path = normalize_path(data_str)
+        with open(normalized_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
         # 根据文件扩展名解析
@@ -165,6 +168,22 @@ def main():
     # 设置日志
     logger = setup_logging(args.verbose)
     
+    # 规范化模板路径（跨平台兼容）
+    normalized_template = normalize_path(args.template)
+    logger.info(f"模板路径: {normalized_template}")
+    
+    # 规范化输出路径（如果指定）
+    normalized_output = None
+    if args.output:
+        normalized_output = normalize_output_path(args.output)
+        logger.info(f"输出路径: {normalized_output}")
+    
+    # 规范化映射配置路径（如果指定）
+    normalized_mapping = None
+    if args.mapping:
+        normalized_mapping = normalize_path(args.mapping)
+        logger.info(f"映射配置路径: {normalized_mapping}")
+    
     # 解析数据输入
     try:
         if args.data_text:
@@ -178,13 +197,13 @@ def main():
         sys.exit(1)
     
     # 执行填充
-    logger.info(f"开始处理模版: {args.template}")
+    logger.info(f"开始处理模版: {normalized_template}")
     
     result = excel_auto_fill(
-        template=args.template,
+        template=normalized_template,
         data=data_input,
-        output=args.output,
-        mapping=args.mapping,
+        output=normalized_output,
+        mapping=normalized_mapping,
         threshold=args.threshold,
         preview=not args.no_preview,
         default_value=args.default,

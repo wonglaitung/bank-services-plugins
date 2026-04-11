@@ -19,6 +19,13 @@ from .exceptions import (
     UnsupportedFormatError,
 )
 from .field_mapper import FieldMapper, FieldMapping, MappingResult
+from .path_utils import (
+    normalize_path,
+    normalize_output_path,
+    validate_dir_path,
+    validate_file_path,
+    validate_path,
+)
 from .template_parser import FieldType, ParsedTemplate, TemplateField, TemplateParser
 from .validators import (
     validate_data_input,
@@ -40,6 +47,12 @@ __all__ = [
     # Auto filling
     'AutoFiller',
     'InputFormatParser',
+    # Path utilities
+    'normalize_path',
+    'validate_path',
+    'validate_file_path',
+    'validate_dir_path',
+    'normalize_output_path',
     # Exceptions
     'ExcelAutoFillError',
     'TemplateError',
