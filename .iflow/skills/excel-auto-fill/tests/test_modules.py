@@ -15,9 +15,9 @@ sys.path.insert(0, skill_dir)
 import openpyxl
 from openpyxl.styles import Font, PatternFill
 
-from auto_filler import AutoFiller, InputFormatParser
-from field_mapper import FieldMapper
-from template_parser import FieldType, TemplateParser
+from excel_auto_fill.auto_filler import AutoFiller, InputFormatParser
+from excel_auto_fill.field_mapper import FieldMapper
+from excel_auto_fill.template_parser import FieldType, TemplateParser
 
 # Import sample templates functions directly
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

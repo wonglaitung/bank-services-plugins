@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-from auto_filler import AutoFiller, InputFormatParser
-from exceptions import (
+from .auto_filler import AutoFiller, InputFormatParser
+from .exceptions import (
     ExcelAutoFillError,
     InvalidDataFormatError,
     NoFieldsFoundError,
@@ -18,9 +18,9 @@ from exceptions import (
     TemplateNotFoundError,
     UnsupportedFormatError,
 )
-from field_mapper import FieldMapper, MappingResult
-from template_parser import ParsedTemplate, TemplateParser
-from validators import (
+from .field_mapper import FieldMapper, MappingResult
+from .template_parser import ParsedTemplate, TemplateParser
+from .validators import (
     check_template_fields,
     validate_data_input,
     validate_output_path,

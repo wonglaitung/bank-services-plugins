@@ -15,7 +15,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from template_parser import FieldType, ParsedTemplate, TemplateField
+from .template_parser import FieldType, ParsedTemplate, TemplateField
 
 
 class InputFormatParser:

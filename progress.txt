@@ -1,0 +1,60 @@
+# 项目进展记录
+
+## 当前状态
+
+项目初始化完成，包含以下功能模块：
+
+### 已完成
+
+1. **excel-auto-fill Skill** (2026-04-11)
+   - Excel 模版自动填充功能
+   - 支持多种标记格式和匹配策略
+   - 已归档
+
+2. **anomaly-detector Skill** (2026-04-11)
+   - 时间序列异常检测
+   - 支持 Z-Score 和 Isolation Forest 方法
+
+3. **OpenSpec 工作流系统** (2026-04-11)
+   - spec-driven schema
+   - 四个核心命令：propose、apply、archive、explore
+
+### 进行中
+
+（暂无）
+
+### 待办
+
+（暂无）
+
+---
+
+## 更新日志
+
+### 2026-04-11
+- 初始化项目结构
+- 完成 excel-auto-fill Skill 开发和归档
+- 完成 anomaly-detector Skill 开发
+- 建立 OpenSpec 工作流系统
+- 更新 AGENTS.md：完善目录结构、修正命令格式、增强 Skill 描述
+- 创建 lessons.md 和 progress.txt 文件
+- 为 excel-auto-fill 添加 Windows 支持：
+  - 创建 `scripts/excel_auto_fill.py` 命令行入口
+  - 创建 `excel_auto_fill.bat` Windows 批处理脚本
+  - 创建 `requirements.txt` 依赖文件
+  - 更新 SKILL.md 添加完整的 Windows/Linux 使用文档
+- 重构 excel-auto-fill 为标准结构：
+  - 创建 `excel_auto_fill/` 模块目录
+  - 移动所有模块文件到子目录
+  - 更新导入路径为相对导入
+  - 所有 20 个测试通过
+- 将"技能开发规范"写入 AGENTS.md：
+  - 标准目录结构
+  - Windows 兼容性要求
+  - 模块导入规范
+  - 验证清单
+- 重构 excel-auto-fill 为标准结构：
+  - 创建 `excel_auto_fill/` 模块目录
+  - 移动所有模块文件到子目录
+  - 更新导入路径为相对导入
+  - 所有 20 个测试通过

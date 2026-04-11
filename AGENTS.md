@@ -1,6 +1,6 @@
 # Bank Services Plugins - 项目上下文
 
-> **  经验教训**：所有关键警告和最佳实践请参阅 [lessons.md](lessons.md)
+> **📋 经验教训**：所有关键警告和最佳实践请参阅 [lessons.md](lessons.md)
 > **🔧 编程规范**：规范化开发流程、系统设计决策、测试验证要求请遵守 [docs/programmer_skill.md](docs/programmer_skill.md)
 
 ## 项目概述
@@ -12,19 +12,29 @@
 ```
 /data/bank-services-plugins/
 ├── .iflow/
-│   ├── commands/           # iFlow 自定义命令
-│   └── skills/             # iFlow Skills 目录
-│       ├── anomaly-detector/     # 时间序列异常检测 Skill
-│       ├── excel-auto-fill/      # Excel 模版自动填充 Skill
-│       └── openspec-*/           # OpenSpec 工作流 Skills
+│   ├── commands/               # iFlow 自定义命令
+│   │   ├── opsx-propose.md     # 创建新变更
+│   │   ├── opsx-apply.md       # 实现变更任务
+│   │   ├── opsx-archive.md     # 归档已完成变更
+│   │   └── opsx-explore.md     # 探索模式和需求分析
+│   └── skills/                 # iFlow Skills 目录
+│       ├── anomaly-detector/   # 时间序列异常检测 Skill
+│       ├── excel-auto-fill/    # Excel 模版自动填充 Skill
+│       ├── openspec-propose/   # OpenSpec 提案 Skill
+│       ├── openspec-apply-change/  # OpenSpec 实现 Skill
+│       ├── openspec-archive-change/ # OpenSpec 归档 Skill
+│       └── openspec-explore/   # OpenSpec 探索 Skill
 ├── docs/
-│   └── programmer_skill.md # 编程规范和开发流程文档
+│   └── programmer_skill.md     # 编程规范和开发流程文档
 ├── openspec/
-│   ├── config.yaml         # OpenSpec 配置
-│   ├── changes/            # 变更目录
-│   │   └── archive/        # 已归档的变更
-│   └── specs/              # 能力规范目录
-└── AGENTS.md               # 本文件
+│   ├── config.yaml             # OpenSpec 配置
+│   ├── changes/                # 变更目录
+│   │   └── archive/            # 已归档的变更
+│   └── specs/                  # 能力规范目录
+│       ├── excel-auto-fill/
+│       ├── excel-template-matching/
+│       └── field-mapping-engine/
+└── AGENTS.md                   # 本文件
 ```
 
 ## OpenSpec 工作流
@@ -44,10 +54,10 @@
 
 | 命令 | 说明 |
 |------|------|
-| `/opsx:propose` | 创建新变更并生成所有 artifacts |
-| `/opsx:apply` | 实现变更任务 |
-| `/opsx:archive` | 归档已完成的变更 |
-| `/opsx:explore` | 探索模式和需求分析 |
+| `/opsx-propose` | 创建新变更并生成所有 artifacts |
+| `/opsx-apply` | 实现变更任务 |
+| `/opsx-archive` | 归档已完成的变更 |
+| `/opsx-explore` | 探索模式和需求分析 |
 
 ## 已实现的 Skills
 
@@ -63,12 +73,111 @@ Excel 模版自动填充工具，支持：
 
 ### 2. anomaly-detector
 时间序列异常检测工具，支持：
-- Z-Score 方法
-- Isolation Forest 方法
+- Z-Score 方法（实时监控）
+- Isolation Forest 方法（深度分析）
+- 自动参数设置（根据时间间隔优化）
 - 多种时间间隔（分钟、小时、天、周）
-- CSV/Excel 数据文件
+- CSV/Excel 数据文件支持
+- 多维特征提取（RSI、MACD、波动率）
 
 **位置**: `.iflow/skills/anomaly-detector/`
+
+## 技能开发规范
+
+> **⚠️ 重要**：所有技能必须遵循以下规范，确保代码质量和跨平台兼容性。
+
+### 1. 标准目录结构（必须遵守）
+
+每个技能必须遵循以下结构：
+
+```
+skill-name/
+├── SKILL.md                    # 技能文档（必需）
+├── skill_name/                 # Python 模块目录（必需，与技能同名）
+│   ├── __init__.py            # 包初始化
+│   ├── core_module.py         # 核心功能模块
+│   └── ...
+├── scripts/                    # 命令行脚本目录（必需）
+│   └── skill_name.py          # CLI 入口脚本
+├── skill_name.bat              # Windows 批处理脚本（必需）
+├── requirements.txt            # 依赖文件（必需）
+└── tests/                      # 测试目录（推荐）
+    ├── test_modules.py
+    └── ...
+```
+
+**示例对比**：
+```
+anomaly-detector/               # ✅ 正确
+├── SKILL.md
+├── anomaly_detector/           # 模块在子目录
+│   ├── __init__.py
+│   ├── zscore_detector.py
+│   └── ...
+├── scripts/
+│   └── detect_anomaly.py
+├── detect_anomaly.bat
+└── requirements.txt
+```
+
+### 2. Windows 兼容性（必须支持）
+
+**批处理脚本模板** (`skill_name.bat`)：
+```batch
+@echo off
+REM Skill Name - Windows Batch Script
+REM Description
+
+python "%~dp0scripts\skill_name.py" %*
+```
+
+**关键点**：
+- 使用 `%~dp0` 获取脚本所在目录，支持任意安装路径
+- 所有路径处理使用相对路径，避免硬编码
+- 在 SKILL.md 中提供 Windows 和 Linux/macOS 两套使用说明
+
+### 3. 模块导入规范
+
+**模块内部使用相对导入**：
+```python
+# ✅ 正确：相对导入
+from .auto_filler import AutoFiller
+from .exceptions import ExcelAutoFillError
+
+# ❌ 错误：绝对导入
+from auto_filler import AutoFiller
+```
+
+**CLI 脚本导入模块**：
+```python
+# 添加技能目录到路径
+SCRIPT_DIR = Path(__file__).parent.parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+# 从模块包导入
+from skill_name.core_module import main_function
+```
+
+### 4. 文档规范
+
+SKILL.md 必须包含：
+- 操作系统检测说明（Windows/Linux/macOS）
+- 两套使用说明（批处理脚本 + Python 脚本）
+- 依赖安装命令（pip/pip3）
+- 命令行参数说明
+- 示例用法
+
+### 5. 验证清单
+
+开发新技能或修改现有技能时，必须验证：
+
+- [ ] 目录结构符合标准
+- [ ] 存在 Windows 批处理脚本 (`.bat`)
+- [ ] 存在 `requirements.txt`
+- [ ] 模块文件在子目录中，使用相对导入
+- [ ] SKILL.md 包含跨平台使用说明
+- [ ] 所有测试通过：`python3 -m pytest tests/`
+- [ ] 语法检查通过：`python3 -m py_compile **/*.py`
 
 ## 开发规范
 
@@ -118,8 +227,9 @@ data_dir = os.path.join(script_dir, 'data')
 
 ## Git 配置
 
-- GitHub Personal Access Token: `YOUR_GITHUB_TOKEN_HERE`
-- 用于 git push 认证
+- 使用 GitHub Personal Access Token 进行认证
+- Token 应存储在环境变量或 git credential helper 中
+- **⚠️ 切勿将 token 提交到代码仓库**
 
 ## 已归档的变更
 
