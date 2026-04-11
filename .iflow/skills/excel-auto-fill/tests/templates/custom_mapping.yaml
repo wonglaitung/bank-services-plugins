@@ -1,0 +1,15 @@
+# Custom field mapping configuration
+# Maps input field names to template field names
+
+mappings:
+  # Short names to full names
+  inv_no: invoice_number
+  cust: customer_name
+  desc: item_description
+  qty: quantity
+  price: unit_price
+
+  # Alternative names
+  invoice_no: invoice_number
+  customer: customer_name
+  item: item_description
