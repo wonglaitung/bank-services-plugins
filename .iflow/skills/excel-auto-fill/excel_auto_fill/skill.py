@@ -55,7 +55,8 @@ def excel_auto_fill(
     threshold: int = 70,
     preview: bool = True,
     default_value: Any = "",
-    overwrite: bool = False
+    overwrite: bool = False,
+    label_column: Optional[int] = None
 ) -> FillResult:
     """
     Fill data into an Excel template.
@@ -71,6 +72,8 @@ def excel_auto_fill(
         preview: Show mapping preview before filling
         default_value: Default value for missing fields
         overwrite: Whether to overwrite existing output file
+        label_column: Column number (1-based) where field labels are located.
+                     Use when labels are not in column A. Example: 2 for column B.
 
     Returns:
         FillResult with operation status and details
@@ -108,13 +111,14 @@ def excel_auto_fill(
 
         # Parse template
         logger.info(f"Loading template: {template}")
-        with TemplateParser() as template_parser:
+        with TemplateParser(label_column=label_column) as template_parser:
             template_parser.load_template(str(template_path))
             parsed_template = template_parser.parse()
 
             logger.info(
                 f"Template parsed: {len(parsed_template.field_names)} fields found, "
-                f"markers={'yes' if parsed_template.has_markers else 'no'}"
+                f"markers={'yes' if parsed_template.has_markers else 'no'}, "
+                f"layout={parsed_template.layout}"
             )
 
             # Check if template has fields

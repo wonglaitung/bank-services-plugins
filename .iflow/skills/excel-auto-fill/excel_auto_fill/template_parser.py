@@ -61,9 +61,17 @@ class TemplateParser:
         re.compile(r'\{\{([^}]+)\}\}'),  # {{fieldName}}
     ]
 
-    def __init__(self):
+    def __init__(self, label_column: Optional[int] = None):
+        """
+        Initialize the template parser.
+        
+        Args:
+            label_column: Optional column number (1-based) where field labels are located.
+                         If not specified, will auto-detect the column with most labels.
+        """
         self.workbook = None
         self.file_path = None
+        self.label_column = label_column
 
     def load_template(self, file_path: str) -> bool:
         """
@@ -301,7 +309,12 @@ class TemplateParser:
         self, sheet, sheet_name: str
     ) -> Tuple[List[TemplateField], str]:
         """
-        Auto-detect field names from first row or first column.
+        Auto-detect field names from first row or any column (for vertical layout).
+        
+        Supports:
+        - Horizontal layout: field names in first row
+        - Vertical layout: field names in any column (auto-detect or specified via label_column)
+        - Values fill in the column to the right of field names
 
         Args:
             sheet: openpyxl worksheet object
@@ -318,19 +331,43 @@ class TemplateParser:
             if cell.value and isinstance(cell.value, str):
                 first_row_values.append((cell.column, str(cell.value).strip()))
 
-        # Check first column (vertical layout)
-        first_col_values = []
-        for row_idx in range(1, sheet.max_row + 1):
-            cell = sheet.cell(row=row_idx, column=1)
-            if cell.value and isinstance(cell.value, str):
-                first_col_values.append((cell.row, str(cell.value).strip()))
+        # Scan all columns for vertical layout candidates
+        # Find the column with the most potential field names
+        column_scores = {}
+        column_values = {}
+        
+        for col_idx in range(1, sheet.max_column + 1):
+            col_values = []
+            for row_idx in range(1, sheet.max_row + 1):
+                cell = sheet.cell(row=row_idx, column=col_idx)
+                if cell.value and isinstance(cell.value, str):
+                    col_values.append((row_idx, str(cell.value).strip()))
+            
+            if col_values:
+                score = self._score_header_candidates(col_values)
+                column_scores[col_idx] = score
+                column_values[col_idx] = col_values
 
-        # Determine layout based on which has more potential fields
-        # and which row/column looks like headers (non-empty, reasonable names)
+        # Determine the best column for vertical layout
+        best_vertical_col = None
+        best_vertical_score = 0
+        
+        if self.label_column:
+            # User specified label column
+            best_vertical_col = self.label_column
+            best_vertical_score = column_scores.get(self.label_column, 0)
+        else:
+            # Auto-detect: find column with highest score
+            for col_idx, score in column_scores.items():
+                if score > best_vertical_score:
+                    best_vertical_score = score
+                    best_vertical_col = col_idx
+
+        # Get horizontal score
         horizontal_score = self._score_header_candidates(first_row_values)
-        vertical_score = self._score_header_candidates(first_col_values)
 
-        if horizontal_score >= vertical_score and first_row_values:
+        # Determine layout
+        if horizontal_score > 0 and horizontal_score >= best_vertical_score:
             # Horizontal layout - field names in first row
             for col, name in first_row_values:
                 if name and not self._is_marker(name):
@@ -348,23 +385,28 @@ class TemplateParser:
                     fields.append(field)
             return fields, "horizontal"
 
-        elif vertical_score > 0 and first_col_values:
-            # Vertical layout - field names in first column
-            for row, name in first_col_values:
+        elif best_vertical_col and best_vertical_score > 0:
+            # Vertical layout - field names in detected/specified column
+            value_col = best_vertical_col + 1  # Values go in the column to the right
+            col_values = column_values.get(best_vertical_col, [])
+            
+            for row, name in col_values:
                 if name and not self._is_marker(name):
                     field = TemplateField(
                         name=name,
                         sheet_name=sheet_name,
                         row=row,
-                        column=2,  # Data is in column 2
-                        cell_ref=f"B{row}",
+                        column=value_col,
+                        cell_ref=f"{get_column_letter(value_col)}{row}",
                         field_type=FieldType.TEXT,
                         original_value=name,
                         is_merged=False,
                         merge_range=None
                     )
                     fields.append(field)
-            return fields, "vertical"
+            
+            layout_info = f"vertical (labels in column {get_column_letter(best_vertical_col)})"
+            return fields, layout_info
 
         return fields, "unknown"
 

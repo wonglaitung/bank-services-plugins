@@ -138,6 +138,8 @@ def main():
     parser.add_argument('-m', '--mapping', help='自定义映射配置文件（YAML/JSON）')
     parser.add_argument('-t', '--threshold', type=int, default=70,
                         help='模糊匹配阈值 0-100（默认: 70）')
+    parser.add_argument('-l', '--label-column', type=int,
+                        help='字段名所在列号（1-based），用于垂直布局模版。例如: 2 表示字段名在 B 列')
     parser.add_argument('--no-preview', action='store_true',
                         help='跳过映射预览')
     parser.add_argument('--default', default='',
@@ -186,7 +188,8 @@ def main():
         threshold=args.threshold,
         preview=not args.no_preview,
         default_value=args.default,
-        overwrite=args.overwrite
+        overwrite=args.overwrite,
+        label_column=args.label_column
     )
     
     # 打印结果
