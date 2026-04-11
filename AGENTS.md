@@ -85,137 +85,93 @@ Excel 模版自动填充工具，支持：
 ## 技能开发规范
 
 > **⚠️ 重要**：所有技能必须遵循以下规范，确保代码质量和跨平台兼容性。
+> 详细规范请参考 `docs/programmer_skill.md`
 
 ### 1. 标准目录结构（必须遵守）
-
-每个技能必须遵循以下结构：
 
 ```
 skill-name/
 ├── SKILL.md                    # 技能文档（必需）
-├── skill_name/                 # Python 模块目录（必需，与技能同名）
-│   ├── __init__.py            # 包初始化
-│   ├── core_module.py         # 核心功能模块
-│   └── ...
-├── scripts/                    # 命令行脚本目录（必需）
-│   └── skill_name.py          # CLI 入口脚本
+├── skill_name/                 # Python 模块目录（必需）
+├── scripts/skill_name.py       # CLI 入口脚本（必需）
 ├── skill_name.bat              # Windows 批处理脚本（必需）
 ├── requirements.txt            # 依赖文件（必需）
 └── tests/                      # 测试目录（推荐）
-    ├── test_modules.py
-    └── ...
-```
-
-**示例对比**：
-```
-anomaly-detector/               # ✅ 正确
-├── SKILL.md
-├── anomaly_detector/           # 模块在子目录
-│   ├── __init__.py
-│   ├── zscore_detector.py
-│   └── ...
-├── scripts/
-│   └── detect_anomaly.py
-├── detect_anomaly.bat
-└── requirements.txt
 ```
 
 ### 2. Windows 兼容性（必须支持）
 
-**批处理脚本模板** (`skill_name.bat`)：
 ```batch
 @echo off
-REM Skill Name - Windows Batch Script
-REM Description
-
 python "%~dp0scripts\skill_name.py" %*
 ```
 
-**关键点**：
-- 使用 `%~dp0` 获取脚本所在目录，支持任意安装路径
-- 所有路径处理使用相对路径，避免硬编码
-- 在 SKILL.md 中提供 Windows 和 Linux/macOS 两套使用说明
+- 使用 `%~dp0` 获取脚本目录
+- SKILL.md 需提供 Windows/Linux 两套说明
 
 ### 3. 模块导入规范
 
-**模块内部使用相对导入**：
 ```python
-# ✅ 正确：相对导入
-from .auto_filler import AutoFiller
-from .exceptions import ExcelAutoFillError
+# ✅ 模块内部：相对导入
+from .core_module import main_function
 
-# ❌ 错误：绝对导入
-from auto_filler import AutoFiller
-```
-
-**CLI 脚本导入模块**：
-```python
-# 添加技能目录到路径
+# ✅ CLI 脚本：添加路径后导入
 SCRIPT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
-
-# 从模块包导入
 from skill_name.core_module import main_function
 ```
 
-### 4. 文档规范
+### 4. SKILL.md 文档规范（必须遵守）
 
-SKILL.md 必须包含：
-- 操作系统检测说明（Windows/Linux/macOS）
-- 两套使用说明（批处理脚本 + Python 脚本）
-- 依赖安装命令（pip/pip3）
-- 命令行参数说明
-- 示例用法
+**必须包含的章节**：
+- 操作系统检测说明
+- 何时使用此技能
+- **使用场景**（必需，见下方详细要求）
+- 核心能力 + 当前限制
+- 安装依赖
+- 使用流程（Windows/Linux + 参数说明）
 
-### 5. 验证清单
+**使用场景章节要求**：
+- 位置：在"何时使用此技能"之后、"核心能力"之前
+- 内容：每个场景需包含名称、描述、示例命令、特点说明
+- 参考：`.iflow/skills/anomaly-detector/SKILL.md`
 
-开发新技能或修改现有技能时，必须验证：
+### 5. 多算法行为一致性（必须遵守）
+
+> **⚠️ 重要**：本项目服务于银行业务，涉及多种算法。当技能支持多种算法时，必须确保行为一致。
+
+**核心原则**：
+- **默认行为一致**：不同算法的默认参数应产生一致的用户预期
+- **报告内容一致**：输出报告应反映实际处理范围，避免误导
+- **参数语义一致**：相同参数名在不同算法中应有相同含义
+
+**检查清单**：
+- [ ] 所有算法的默认参数是否一致？
+- [ ] 相同参数名是否有相同语义？
+- [ ] 输出报告是否准确反映实际处理范围？
+- [ ] 是否明确区分了不同使用场景？
+
+### 6. 核心开发原则
+
+| 原则 | 说明 |
+|------|------|
+| 修改完即测试 | 每次修改后立即 `python3 -m py_compile` 和 `pytest` |
+| 需求分析优先 | 深入理解需求，不急于编码 |
+| 零重复代码 | 严禁复制粘贴，提取公共函数 |
+| 系统定位优先 | 系统定位 > 功能实现 |
+| 避免硬编码路径 | 使用相对路径，配置外化 |
+| HTTP API 超时 | 必须设置超时，实现备用方案 |
+
+### 7. 验证清单
 
 - [ ] 目录结构符合标准
 - [ ] 存在 Windows 批处理脚本 (`.bat`)
 - [ ] 存在 `requirements.txt`
-- [ ] 模块文件在子目录中，使用相对导入
+- [ ] 模块使用相对导入
+- [ ] SKILL.md 包含"使用场景"章节
 - [ ] SKILL.md 包含跨平台使用说明
-- [ ] 所有测试通过：`python3 -m pytest tests/`
-- [ ] 语法检查通过：`python3 -m py_compile **/*.py`
-
-## 开发规范
-
-详见 `docs/programmer_skill.md`，核心原则：
-
-### 1. 修改完即测试（最高优先级）
-```bash
-# 语法检查
-python3 -m py_compile <文件路径>
-
-# 运行测试
-python3 -m pytest tests/
-```
-
-### 2. 需求分析优先
-- 深入理解需求，不急于编码
-- 识别核心目标和边界条件
-
-### 3. 零重复代码原则
-- 严禁复制粘贴相似代码
-- 提取公共函数复用
-
-### 4. 系统定位优先
-- 系统定位 > 功能实现
-- 差异化 > 一致性
-- 目标用户决定功能
-
-### 5. 避免硬编码路径
-```python
-# 推荐：基于脚本目录构建相对路径
-import os
-script_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = os.path.join(script_dir, 'data')
-```
-
-### 6. HTTP API 超时处理
-- 必须设置合理的超时时间
-- 实现备用方案
+- [ ] 多算法行为一致
+- [ ] 测试通过：`python3 -m pytest tests/`
 
 ## 技术栈
 

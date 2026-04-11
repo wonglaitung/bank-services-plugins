@@ -14,6 +14,9 @@
 2. **anomaly-detector Skill** (2026-04-11)
    - 时间序列异常检测
    - 支持 Z-Score 和 Isolation Forest 方法
+   - 新增 --lookback 参数（自动时间单位转换）
+   - 修复 Isolation Forest lookback_days=0 bug
+   - 重构 SKILL.md 文档结构
 
 3. **OpenSpec 工作流系统** (2026-04-11)
    - spec-driven schema
@@ -58,3 +61,10 @@
   - 移除 AGENTS.md 中的敏感 token
   - 使用 `git filter-branch` 重写历史清理敏感信息
   - 成功推送到 main 分支
+- 修复 anomaly-detector Skill：
+  - 修复 Isolation Forest `lookback_days=0` 过滤掉所有历史数据的 bug
+  - 修改默认 `lookback_days` 为 0（检测全部数据），与 Z-Score 行为一致
+  - 新增 `--lookback` 参数，根据 `--time-interval` 自动转换时间单位
+  - 新增数据量不足警告机制
+  - 修复 type 字段显示 `time_series` 而非列名的问题
+  - 重构 SKILL.md：删除重复章节、按用户使用顺序重新组织、精简冗余内容
