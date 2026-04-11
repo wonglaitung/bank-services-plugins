@@ -159,7 +159,7 @@ from skill_name.core_module import main_function
 | 需求分析优先 | 深入理解需求，不急于编码 |
 | 零重复代码 | 严禁复制粘贴，提取公共函数 |
 | 系统定位优先 | 系统定位 > 功能实现 |
-| 避免硬编码路径 | 使用相对路径，配置外化 |
+| 跨平台路径规范化 | 使用 `path_utils.py` 处理混合路径格式（`~/` + `\`），统一输出正斜杠 |
 | HTTP API 超时 | 必须设置超时，实现备用方案 |
 
 ### 7. 验证清单
@@ -171,6 +171,7 @@ from skill_name.core_module import main_function
 - [ ] SKILL.md 包含"使用场景"章节
 - [ ] SKILL.md 包含跨平台使用说明
 - [ ] 多算法行为一致
+- [ ] 文件路径使用 `normalize_path()` 处理跨平台格式
 - [ ] 测试通过：`python3 -m pytest tests/`
 
 ## 技术栈

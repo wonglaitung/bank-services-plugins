@@ -22,6 +22,12 @@
    - spec-driven schema
    - 四个核心命令：propose、apply、archive、explore
 
+4. **跨平台路径规范化** (2026-04-12)
+   - 为 anomaly-detector 和 excel-auto-fill 添加 `path_utils.py` 模块
+   - 支持混合路径格式（Unix `~/` + Windows `\`）
+   - 自动处理波浪号扩展和反斜杠转换
+   - CLI 脚本集成路径规范化处理
+
 ### 进行中
 
 （暂无）
@@ -68,3 +74,11 @@
   - 新增数据量不足警告机制
   - 修复 type 字段显示 `time_series` 而非列名的问题
   - 重构 SKILL.md：删除重复章节、按用户使用顺序重新组织、精简冗余内容
+
+### 2026-04-12
+- 添加跨平台路径规范化功能：
+  - 创建 `path_utils.py` 模块（anomaly-detector 和 excel-auto-fill）
+  - 支持 `normalize_path()`、`validate_path()` 等函数
+  - 处理混合路径格式（`~/` + `\`）
+  - CLI 脚本集成路径规范化
+- 推送到 GitHub：`08e7a0b feat(skills): add cross-platform path normalization`

@@ -198,3 +198,43 @@ cutoff_date = utc_now - timedelta(days=lookback_days) if lookback_days > 0 else 
 - 文档按"用户使用流程"组织，而非"功能模块"
 - 定期检查是否有重复或冗余内容
 - 参考 excel-auto-fill 的文档结构模板
+
+---
+
+### 9. 跨平台路径格式问题
+**日期**：2026-04-12
+
+**问题**：系统注入的技能路径混合使用 Unix 风格 `~/` 和 Windows 风格 `\`，导致路径解析失败。
+
+**示例**：
+```
+~/Documents\My Projects\AiAgentLab\skills\anomaly-detector\SKILL.md
+```
+
+**原因**：
+- 系统在不同环境下运行（Windows WSL + Linux）
+- 配置文件路径未进行统一规范化处理
+- 路径拼接时未考虑平台差异
+
+**解决方案**：使用 `pathlib` + 字符串替换混合方案：
+
+```python
+from pathlib import Path
+
+def normalize_path(raw_path: str) -> str:
+    # 使用 pathlib 解析路径
+    path = Path(raw_path).expanduser()
+    
+    # 统一输出为正斜杠
+    return str(path).replace('\\', '/')
+```
+
+**混合方案优势**：
+- 存储时使用字符串替换保证格式统一
+- 验证时使用 `pathlib` 确保路径有效
+- 灵活应对不同场景
+
+**预防措施**：
+- 所有文件路径处理都应使用路径规范化
+- 配置文件存储路径时统一使用正斜杠
+- 添加单元测试覆盖跨平台路径场景
