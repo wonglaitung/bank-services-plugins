@@ -84,7 +84,7 @@ class IsolationForestDetector:
         self,
         features: pd.DataFrame,
         timestamps: List[datetime],
-        lookback_days: int = 7,
+        lookback_days: float = 7,
         time_interval: Optional[Union[str, TimeInterval]] = None
     ) -> List[Dict]:
         """
@@ -93,7 +93,7 @@ class IsolationForestDetector:
         Args:
             features: Feature matrix
             timestamps: Corresponding timestamps
-            lookback_days: Only return anomalies from last N days (default: 7)
+            lookback_days: Only return anomalies from last N days (supports float for minute/hour intervals)
             time_interval: Time interval type for the data (for metadata)
         
         Returns:
@@ -125,26 +125,37 @@ class IsolationForestDetector:
         # Use UTC datetime for comparison to avoid timezone issues
         from datetime import timezone
         utc_now = datetime.now(timezone.utc)
-        cutoff_date = utc_now - timedelta(days=lookback_days)
+        # 支持 lookback_days 为浮点数（用于分钟/小时级别的时间范围）
+        cutoff_date = utc_now - timedelta(days=lookback_days) if lookback_days > 0 else None
+        
+        # Track how many data points are in the lookback window
+        data_in_window = 0
+        total_anomalies_found = 0
         
         for i, (score, pred) in enumerate(zip(anomaly_scores, predictions)):
-            if pred == -1:  # Anomaly
-                timestamp = timestamps[i]
-                
-                # Handle different timestamp types (datetime, int, str, etc.)
-                if isinstance(timestamp, datetime):
-                    # Normalize timestamp to UTC for comparison
-                    if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is not None:
-                        timestamp_utc = timestamp.astimezone(timezone.utc)
-                    else:
-                        timestamp_utc = timestamp.replace(tzinfo=timezone.utc)
+            timestamp = timestamps[i]
+            
+            # Handle different timestamp types (datetime, int, str, etc.)
+            if isinstance(timestamp, datetime):
+                # Normalize timestamp to UTC for comparison
+                if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is not None:
+                    timestamp_utc = timestamp.astimezone(timezone.utc)
                 else:
-                    # For non-datetime types (int index, string, etc.), skip time filtering
-                    # Use current time as placeholder (all anomalies will be included)
-                    timestamp_utc = utc_now
+                    timestamp_utc = timestamp.replace(tzinfo=timezone.utc)
+            else:
+                # For non-datetime types (int index, string, etc.), skip time filtering
+                # Use current time as placeholder (all anomalies will be included)
+                timestamp_utc = utc_now
+            
+            # Count data points in lookback window
+            if cutoff_date is None or timestamp_utc >= cutoff_date:
+                data_in_window += 1
+            
+            if pred == -1:  # Anomaly
+                total_anomalies_found += 1
                 
-                # Only include recent anomalies
-                if timestamp_utc >= cutoff_date:
+                # Only include recent anomalies (lookback_days=0 means include all)
+                if cutoff_date is None or timestamp_utc >= cutoff_date:
                     severity = self._get_severity(score)
                     
                     # Get feature values
@@ -169,6 +180,26 @@ class IsolationForestDetector:
                         'feature_count': len(feature_values),
                         'feature_names': list(feature_values.keys())
                     })
+        
+        # Warn if data in lookback window is insufficient
+        min_samples_for_detection = 20  # Minimum samples for reliable Isolation Forest
+        if lookback_days > 0 and data_in_window < min_samples_for_detection:
+            logger.warning(
+                f"检测窗口内数据不足: {data_in_window} 个数据点 (建议至少 {min_samples_for_detection} 个)。"
+                f"建议使用 --lookback-days 0 检测全部数据。"
+            )
+            # Add warning to anomalies for caller to access
+            if anomalies:
+                anomalies[0]['_warning'] = (
+                    f"检测窗口内数据不足 ({data_in_window} 个数据点)，"
+                    f"建议使用 --lookback-days 0 检测全部数据以获得更全面的结果"
+                )
+        
+        # Info log about detection scope
+        if lookback_days > 0:
+            logger.info(f"检测范围: 最近 {lookback_days} 天内的 {data_in_window} 个数据点")
+            if total_anomalies_found > len(anomalies):
+                logger.info(f"全部数据共发现 {total_anomalies_found} 个异常，其中 {len(anomalies)} 个在检测窗口内")
         
         logger.info(f"Detected {len(anomalies)} anomalies in last {lookback_days} days")
         

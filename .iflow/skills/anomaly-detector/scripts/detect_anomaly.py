@@ -127,7 +127,8 @@ def detect_zscore(
     column: str,
     window_size: int = 30,
     threshold: float = 3.0,
-    time_interval: str = 'day'
+    time_interval: str = 'day',
+    lookback_days: float = 0
 ) -> List[Dict]:
     """
     使用 Z-Score 方法检测异常
@@ -138,6 +139,7 @@ def detect_zscore(
         window_size: 窗口大小
         threshold: 阈值
         time_interval: 时间间隔
+        lookback_days: 回溯天数（支持浮点数，0 表示检测全部数据）
     
     Returns:
         异常列表
@@ -152,7 +154,7 @@ def detect_zscore(
     )
     
     history = df[column].dropna()
-    anomalies = []
+    all_anomalies = []
     
     # 检测每个时间点
     for i in range(window_size, len(history)):
@@ -169,16 +171,36 @@ def detect_zscore(
         )
         
         if anomaly:
-            anomalies.append(anomaly)
+            all_anomalies.append(anomaly)
     
-    return anomalies
+    # 根据 lookback_days 过滤结果
+    if lookback_days > 0:
+        from datetime import datetime, timezone, timedelta
+        utc_now = datetime.now(timezone.utc)
+        cutoff_date = utc_now - timedelta(days=lookback_days)
+        
+        filtered_anomalies = []
+        for anomaly in all_anomalies:
+            ts = anomaly['timestamp']
+            if isinstance(ts, datetime):
+                if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
+                    ts_utc = ts.astimezone(timezone.utc)
+                else:
+                    ts_utc = ts.replace(tzinfo=timezone.utc)
+                if ts_utc >= cutoff_date:
+                    filtered_anomalies.append(anomaly)
+        
+        logging.info(f"全部数据共发现 {len(all_anomalies)} 个异常，其中 {len(filtered_anomalies)} 个在最近 {lookback_days} 天内")
+        return filtered_anomalies
+    
+    return all_anomalies
 
 
 def detect_isolation_forest(
     df: pd.DataFrame,
     column: str,
     contamination: float = 0.03,
-    lookback_days: int = 7,
+    lookback_days: float = 0,
     use_all_columns: bool = False
 ) -> List[Dict]:
     """
@@ -188,7 +210,7 @@ def detect_isolation_forest(
         df: 数据 DataFrame
         column: 要检测的列名
         contamination: 异常比例
-        lookback_days: 回溯天数
+        lookback_days: 回溯天数（支持浮点数，0 表示检测全部数据）
         use_all_columns: 是否使用所有数值列进行多维特征提取（默认 False，仅使用指定列）
     
     Returns:
@@ -217,7 +239,7 @@ def detect_isolation_forest(
     # 训练 Isolation Forest
     detector = IsolationForestDetector(
         contamination=contamination,
-        anomaly_type='time_series'
+        anomaly_type=column  # 使用列名作为类型，与 Z-Score 行为一致
     )
     detector.train(features)
     
@@ -476,10 +498,17 @@ def main():
     )
     
     parser.add_argument(
+        '--lookback',
+        type=int,
+        default=None,
+        help='回溯时间单位数（根据 --time-interval 自动决定单位）。例如：--time-interval hour --lookback 24 表示检测最近 24 小时'
+    )
+    
+    parser.add_argument(
         '--lookback-days',
         type=int,
-        default=30,
-        help='Isolation Forest 回溯天数（默认 30 天，设为 0 检测全部数据）'
+        default=None,
+        help='回溯天数（已弃用，建议使用 --lookback）。设为 0 检测全部数据'
     )
     
     parser.add_argument(
@@ -513,18 +542,36 @@ def main():
         df = load_data(args.input_file, args.column, args.sheet, args.timestamp_column)
         logger.info(f"数据行数: {len(df)}")
         
+        # 处理 lookback 参数
+        # --lookback 优先级高于 --lookback-days
+        if args.lookback is not None:
+            # 根据 time_interval 将 lookback 转换为天数（保持浮点数）
+            time_interval_to_days = {
+                'minute': 1 / 1440,  # 1分钟 = 1/1440天
+                'hour': 1 / 24,      # 1小时 = 1/24天
+                'day': 1,            # 1天 = 1天
+                'week': 7,           # 1周 = 7天
+            }
+            days_per_unit = time_interval_to_days.get(args.time_interval, 1)
+            args.lookback_days = args.lookback * days_per_unit
+            logger.info(f"回溯设置: {args.lookback} 个{args.time_interval} = {args.lookback_days:.4f} 天")
+        elif args.lookback_days is None:
+            # 默认检测全部数据
+            args.lookback_days = 0
+        
         # 检测异常
         all_anomalies = []
         
         # Z-Score 检测
         if args.method in ['zscore', 'both']:
-            logger.info(f"使用 Z-Score 方法检测 (窗口: {args.window_size}, 阈值: {args.threshold})")
+            logger.info(f"使用 Z-Score 方法检测 (窗口: {args.window_size}, 阈值: {args.threshold}, 回溯: {args.lookback_days} 天)")
             zscore_anomalies = detect_zscore(
                 df=df,
                 column=args.column,
                 window_size=args.window_size,
                 threshold=args.threshold,
-                time_interval=args.time_interval
+                time_interval=args.time_interval,
+                lookback_days=args.lookback_days
             )
             
             output = format_output(

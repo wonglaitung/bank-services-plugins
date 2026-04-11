@@ -45,6 +45,89 @@ uname -a
 - **IoT 数据分析**：检测传感器数据异常
 - **业务指标监控**：检测销售额、用户活跃度等异常波动
 
+## 使用场景
+
+### 1. 历史回测（默认）
+
+分析历史数据中的所有异常点，适合数据探索和模式分析。
+
+```bash
+# 检测全部数据
+python3 detect_anomaly.py data.csv --column price
+```
+
+**特点**：
+- 默认 `--lookback 0`（检测全部数据）
+- 分析历史数据中的所有异常
+- 适合数据探索、模式分析、回测验证
+
+### 2. 实时监控
+
+使用历史数据训练模型，只报告最新 N 个时间单位的异常，适合持续监控和告警系统。
+
+```bash
+# 每小时运行一次，检测最近 1 小时
+python3 detect_anomaly.py data.csv --column price \
+  --time-interval hour \
+  --window-size 168 \
+  --lookback 1
+```
+
+**特点**：
+- 使用 `--lookback N` 限制检测范围
+- 使用历史数据训练模型，只报告最新 N 个时间单位的异常
+- 适合持续监控、告警系统
+
+### 工作流程对比
+
+```
+历史回测模式：
+┌────────────────────────────────────────────┐
+│  ←────────── 全部历史数据 ──────────→      │
+│  检测所有异常点                            │
+└────────────────────────────────────────────┘
+
+实时监控模式：
+┌────────────────────────────────────────────┐
+│  历史数据（训练）         │  检测窗口     │
+│  ←─── window-size ───→    │←─ lookback ─→│
+│  计算基准、训练模型        │  报告异常     │
+└────────────────────────────────────────────┘
+```
+
+## 核心能力
+
+- **Z-Score 检测**：基于移动窗口的实时异常检测
+- **Isolation Forest 检测**：多维特征深度分析
+- **多时间间隔支持**：minute、hour、day、week
+- **多数据格式支持**：CSV、Excel（.xlsx）
+- **自动特征提取**：RSI、MACD、波动率等技术指标
+- **严重程度分级**：high、medium、low
+
+## 当前限制
+
+- Isolation Forest 需要至少 100 个数据点
+- Z-Score 窗口大小需要小于数据点数量
+- 自动特征提取仅支持包含 OHLCV 列的数据
+
+## 安装依赖
+
+技能需要以下 Python 包：
+
+```bash
+# Linux/macOS
+pip3 install pandas numpy scikit-learn openpyxl
+
+# Windows
+pip install pandas numpy scikit-learn openpyxl
+```
+
+**依赖版本要求**：
+- pandas >= 1.3.0
+- numpy >= 1.20.0
+- scikit-learn >= 1.0.0
+- openpyxl >= 3.0.0（Excel 支持）
+
 ## 检测方法
 
 **默认行为**：同时使用两种方法检测，提供更全面的异常分析。
@@ -124,41 +207,68 @@ python3 /full/path/to/skills/anomaly-detector/scripts/detect_anomaly.py data.csv
 
 **注意**：`\full\path\to` 为示例路径，请替换为实际的安装根路径。
 
-## 安装依赖
+## 实时监控数据量要求
 
-技能需要以下 Python 包：
+### 数据量要求
 
+| 时间维度 | Z-Score 最少数据 | Isolation Forest 最少数据 | 推荐数据量 |
+|----------|------------------|---------------------------|------------|
+| `minute` | 61 分钟 | 100 分钟（~2小时） | 1440 分钟（1天） |
+| `hour` | 25 小时（~1天） | 100 小时（~4天） | 168 小时（7天） |
+| `day` | 31 天 | 100 天（~3个月） | 365 天（1年） |
+| `week` | 13 周（~3个月） | 100 周（~2年） | 52 周（1年） |
+
+### 实时监控命令示例
+
+**分钟级监控**（如服务器指标）：
 ```bash
-# Linux/macOS（使用 python3）
-pip3 install -r /full/path/to/skills/anomaly-detector/requirements.txt
-
-# Windows CMD（使用 python）
-pip install -r \full\path\to\skills\anomaly-detector\requirements.txt
-
-# 直接安装
-pip install pandas numpy scikit-learn openpyxl
+# 每分钟运行一次，检测最近 1 分钟
+# 需要至少 1 小时历史数据
+python3 detect_anomaly.py server_metrics.csv \
+  --column cpu_usage \
+  --time-interval minute \
+  --window-size 60 \
+  --lookback 1
 ```
 
-**依赖版本要求**：
-- pandas >= 1.3.0
-- numpy >= 1.20.0
-- scikit-learn >= 1.0.0
-- openpyxl >= 3.0.0（Excel 支持）
+**小时级监控**（如业务指标）：
+```bash
+# 每小时运行一次，检测最近 1 小时
+# 需要至少 7 天历史数据
+python3 detect_anomaly.py business_metrics.csv \
+  --column daily_sales \
+  --time-interval hour \
+  --window-size 168 \
+  --lookback 1
+```
 
-## 核心能力
+**天级监控**（如股票价格）：
+```bash
+# 每天运行一次，检测最近 1 天
+# 需要至少 30 天历史数据
+python3 detect_anomaly.py stock_data.csv \
+  --column close_price \
+  --time-interval day \
+  --window-size 30 \
+  --lookback 1
+```
 
-- **Z-Score 检测**：基于移动窗口的实时异常检测
-- **Isolation Forest 检测**：多维特征深度分析
-- **多时间间隔支持**：minute、hour、day、week
-- **多数据格式支持**：CSV、Excel（.xlsx）
-- **自动特征提取**：RSI、MACD、波动率等技术指标
-- **严重程度分级**：high、medium、low
+### 实时监控工作原理
 
-## 当前限制
+```
+┌─────────────────────────────────────────────────────────┐
+│         历史数据（用于训练）         │  检测  │
+│  ←───────────── window-size ─────────────→│←lookback→│
+│                                           │          │
+│  用于计算均值、标准差、                   │  检测这  │
+│  训练 Isolation Forest 模型               │  N 个点  │
+└─────────────────────────────────────────────────────────┘
+```
 
-- Isolation Forest 需要至少 100 个数据点
-- Z-Score 窗口大小需要小于数据点数量
-- 自动特征提取仅支持包含 OHLCV 列的数据
+**建议**：
+- 历史数据量 ≥ `window-size`（Z-Score）或 ≥ 100 个数据点（Isolation Forest）
+- `--lookback` 设为检测频率（如每小时检测则 `--lookback 1`）
+- 定期更新历史数据以保持模型准确性
 
 ## 使用流程
 
@@ -185,7 +295,9 @@ pip install pandas numpy scikit-learn openpyxl
 
 # 仅使用 Isolation Forest 检测
 \full\path\to\skills\anomaly-detector\detect_anomaly.bat data.csv --column price --method isolation-forest
-\full\path\to\skills\anomaly-detector\detect_anomaly.bat data.csv --method isolation-forest
+
+# 实时监控：检测最近 30 天（根据 --time-interval 自动决定单位）
+\full\path\to\skills\anomaly-detector\detect_anomaly.bat data.csv --column price --lookback 30
 
 # 指定窗口大小和阈值
 \full\path\to\skills\anomaly-detector\detect_anomaly.bat data.csv --column price --window-size 60 --threshold 2.5
@@ -217,8 +329,11 @@ python3 /full/path/to/skills/anomaly-detector/scripts/detect_anomaly.py data.csv
 # 多维特征提取（使用所有数值列）
 python3 /full/path/to/skills/anomaly-detector/scripts/detect_anomaly.py data.csv --column sales --multi-column --method isolation-forest
 
-# 检测全部数据（不限制回溯天数）
-python3 /full/path/to/skills/anomaly-detector/scripts/detect_anomaly.py data.csv --column price --lookback-days 0
+# 检测全部数据（默认，两种方法都支持）
+python3 /full/path/to/skills/anomaly-detector/scripts/detect_anomaly.py data.csv --column price
+
+# 实时监控模式：检测最近 30 天（根据 --time-interval 自动决定单位）
+python3 /full/path/to/skills/anomaly-detector/scripts/detect_anomaly.py data.csv --column price --lookback 30
 
 # 仅使用 Z-Score 检测
 python3 /full/path/to/skills/anomaly-detector/scripts/detect_anomaly.py data.csv --column price --method zscore
@@ -246,7 +361,8 @@ python3 /full/path/to/skills/anomaly-detector/scripts/detect_anomaly.py --help
 | `--time-interval` | - | ❌ | 时间间隔：minute、hour、day（默认）、week |
 | `--timestamp-column` | - | ❌ | 时间戳列名（可选，不指定则自动检测） |
 | `--multi-column` | - | ❌ | 使用所有数值列进行多维特征提取（仅 Isolation Forest 有效） |
-| `--lookback-days` | - | ❌ | Isolation Forest 回溯天数（默认 30，设为 0 检测全部数据） |
+| `--lookback` | - | ❌ | 回溯时间单位数（根据 --time-interval 自动决定单位） |
+| `--lookback-days` | - | ❌ | 回溯天数（已弃用，建议使用 --lookback） |
 | `--sheet` | `-s` | ❌ | Excel 工作表名称（默认第一个工作表） |
 | `--output` | `-o` | ❌ | 输出文件路径（默认打印到控制台） |
 | `--help` | `-h` | ❌ | 显示帮助信息 |
@@ -313,18 +429,19 @@ timestamp,price,volume
 ```
 === 异常检测结果 ===
 检测方法: Isolation Forest
+检测指标: price
 异常比例: 0.03
 
 发现 5 个异常:
 
 [1] 2024-01-15 10:00:00
-    类型: isolation_forest
+    类型: price
     严重程度: high
     异常分数: -0.15
     特征数: 10
 
 [2] 2024-01-20 14:30:00
-    类型: isolation_forest
+    类型: price
     严重程度: medium
     异常分数: -0.08
     特征数: 10
