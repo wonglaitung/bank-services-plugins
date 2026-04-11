@@ -53,8 +53,8 @@
   - Windows 兼容性要求
   - 模块导入规范
   - 验证清单
-- 重构 excel-auto-fill 为标准结构：
-  - 创建 `excel_auto_fill/` 模块目录
-  - 移动所有模块文件到子目录
-  - 更新导入路径为相对导入
-  - 所有 20 个测试通过
+- 推送代码到 GitHub：
+  - 配置远程仓库 `https://github.com/wonglaitung/bank-services-plugins.git`
+  - 移除 AGENTS.md 中的敏感 token
+  - 使用 `git filter-branch` 重写历史清理敏感信息
+  - 成功推送到 main 分支

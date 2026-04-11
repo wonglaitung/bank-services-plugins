@@ -90,3 +90,35 @@ python "%~dp0scripts\skill_name.py" %*
 ```
 
 **预防措施**：新建 Skill 时，优先考虑跨平台兼容性，提供 Windows 批处理脚本和 Linux 脚本。
+
+---
+
+### 5. 敏感信息切勿提交到代码仓库
+**日期**：2026-04-11
+
+**问题**：AGENTS.md 中包含 GitHub Personal Access Token，推送到 GitHub 时被 Push Protection 拦截。
+
+**原因**：将 token 硬编码在文档中，方便使用但忽略了安全风险。
+
+**解决方案**：
+1. 从文件中移除敏感 token
+2. 使用 `git filter-branch` 重写所有历史提交：
+   ```bash
+   git filter-branch --force --tree-filter '
+     if [ -f AGENTS.md ]; then
+       sed -i "s/ghp_xxx/YOUR_GITHUB_TOKEN_HERE/g" AGENTS.md
+     fi
+   ' --prune-empty -- --all
+   ```
+3. 强制推送到远程仓库：`git push --force`
+
+**正确做法**：
+- Token 应存储在环境变量：`export GITHUB_TOKEN=xxx`
+- 或使用 git credential helper：`git config credential.helper store`
+- 文档中只写使用说明，不包含实际 token
+
+**预防措施**：
+1. 提交前检查是否包含敏感信息（API key、token、password 等）
+2. 使用 `.gitignore` 排除敏感文件
+3. 启用 GitHub Push Protection 自动检测
+4. 如已泄露，立即 revoke token 并生成新的
