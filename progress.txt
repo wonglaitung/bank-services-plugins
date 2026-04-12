@@ -40,6 +40,14 @@
 
 ## 更新日志
 
+### 2026-04-13
+- 完成从 iFlow CLI 到 Claude Code 的迁移：
+  - 删除 `.iflow/` 目录和 OpenSpec 相关文件
+  - 删除 OpenSpec skills（openspec-propose、openspec-apply-change、openspec-archive-change、openspec-explore）
+  - 删除 `openspec/` 目录（变更管理、能力规范等）
+  - 更新 CLAUDE.md 为 Claude Code 格式
+  - 简化项目结构，专注于核心 Skills
+
 ### 2026-04-11
 - 初始化项目结构
 - 完成 excel-auto-fill Skill 开发和归档
