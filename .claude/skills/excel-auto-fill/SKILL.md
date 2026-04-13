@@ -450,4 +450,4 @@ A: 使用 `-v` 参数显示详细信息，包括匹配的字段列表。
 
 - [openpyxl 文档](https://openpyxl.readthedocs.io/)
 - [fuzzywuzzy 文档](https://github.com/seatgeek/fuzzywuzzy)
-- [iFlow CLI 技能系统文档](https://platform.iflow.cn/cli/examples/skill)
+- [Claude Code Skills 文档](https://docs.anthropic.com/en/docs/claude-code/skills)
