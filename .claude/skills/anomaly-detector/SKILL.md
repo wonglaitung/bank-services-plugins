@@ -552,4 +552,4 @@ A: 根据历史经验设置。如果不确定，可从 0.01-0.05 开始尝试。
 
 - [Z-Score 异常检测原理](https://en.wikipedia.org/wiki/Standard_score)
 - [Isolation Forest 论文](https://cs.nju.edu.cn/zhouzh/zhouzh.files/publication/icdm08b.pdf)
-- [iFlow CLI 技能系统文档](https://platform.iflow.cn/cli/examples/skill)
+- [Claude Code Skills 文档](https://docs.anthropic.com/en/docs/claude-code/skills)

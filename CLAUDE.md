@@ -5,19 +5,19 @@
 
 ## 项目概述
 
-这是 iFlow CLI 的插件仓库，包含自定义 Skills 和 OpenSpec 工作流系统。项目用于管理和开发自动化工具，支持规范化的变更管理流程。
+这是 Claude Code 的插件仓库，包含自定义 Skills 和 OpenSpec 工作流系统。项目用于管理和开发自动化工具，支持规范化的变更管理流程。
 
 ## 目录结构
 
 ```
 /data/bank-services-plugins/
-├── .iflow/
-│   ├── commands/               # iFlow 自定义命令
+├── .claude/
+│   ├── commands/               # Claude Code 自定义命令
 │   │   ├── opsx-propose.md     # 创建新变更
 │   │   ├── opsx-apply.md       # 实现变更任务
 │   │   ├── opsx-archive.md     # 归档已完成变更
 │   │   └── opsx-explore.md     # 探索模式和需求分析
-│   └── skills/                 # iFlow Skills 目录
+│   └── skills/                 # Claude Code Skills 目录
 │       ├── anomaly-detector/   # 时间序列异常检测 Skill
 │       ├── excel-auto-fill/    # Excel 模版自动填充 Skill
 │       ├── openspec-propose/   # OpenSpec 提案 Skill
@@ -25,7 +25,8 @@
 │       ├── openspec-archive-change/ # OpenSpec 归档 Skill
 │       └── openspec-explore/   # OpenSpec 探索 Skill
 ├── docs/
-│   └── programmer_skill.md     # 编程规范和开发流程文档
+│   ├── programmer_skill.md     # 编程规范和开发流程文档
+│   └── superpowers/specs/      # 设计文档目录
 ├── openspec/
 │   ├── config.yaml             # OpenSpec 配置
 │   ├── changes/                # 变更目录
@@ -34,7 +35,7 @@
 │       ├── excel-auto-fill/
 │       ├── excel-template-matching/
 │       └── field-mapping-engine/
-└── AGENTS.md                   # 本文件
+└── CLAUDE.md                   # 本文件
 ```
 
 ## OpenSpec 工作流
@@ -69,7 +70,7 @@ Excel 模版自动填充工具，支持：
 - 样式保留（字体、边框、颜色）
 - 多种输入格式（JSON、字典、键值对文本）
 
-**位置**: `.iflow/skills/excel-auto-fill/`
+**位置**: `.claude/skills/excel-auto-fill/`
 
 ### 2. anomaly-detector
 时间序列异常检测工具，支持：
@@ -80,7 +81,7 @@ Excel 模版自动填充工具，支持：
 - CSV/Excel 数据文件支持
 - 多维特征提取（RSI、MACD、波动率）
 
-**位置**: `.iflow/skills/anomaly-detector/`
+**位置**: `.claude/skills/anomaly-detector/`
 
 ## 技能开发规范
 
@@ -134,7 +135,7 @@ from skill_name.core_module import main_function
 **使用场景章节要求**：
 - 位置：在"何时使用此技能"之后、"核心能力"之前
 - 内容：每个场景需包含名称、描述、示例命令、特点说明
-- 参考：`.iflow/skills/anomaly-detector/SKILL.md`
+- 参考：`.claude/skills/anomaly-detector/SKILL.md`
 
 ### 5. 多算法行为一致性（必须遵守）
 
