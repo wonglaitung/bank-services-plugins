@@ -210,3 +210,62 @@ def normalize_path(raw_path: str) -> str:
 - 所有文件路径处理都应使用路径规范化
 - 配置文件存储路径时统一使用正斜杠
 - 添加单元测试覆盖跨平台路径场景
+
+---
+
+### 8. 命令行中文路径编码问题
+**日期**：2026-04-13
+
+**问题**：Windows CMD 传递中文路径参数时出现乱码，导致文件找不到错误。
+
+**示例**：
+```batch
+REM 用户输入
+python detect_anomaly.py "D:\测试\data.csv" --column 收市价
+
+REM Python 接收到的路径（乱码）
+"D:\æµ\x8bè¯\x95\data.csv"
+```
+
+**原因**：
+- Windows CMD 默认使用系统编码（GBK/CP936）
+- Python 3 使用 UTF-8 解码 `sys.argv`
+- 编码不匹配导致中文字符变成乱码
+
+**解决方案**：
+
+1. **编码修复函数**（推荐）：
+```python
+def fix_chinese_path_encoding(raw_path: str) -> str:
+    """修复命令行传递的中文路径编码问题"""
+    if sys.platform != 'win32':
+        return raw_path
+
+    try:
+        # UTF-8 编码 -> GBK 解码
+        return raw_path.encode('utf-8').decode('gbk')
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return raw_path
+```
+
+2. **替代方案**（绕过命令行）：
+   - 从配置文件读取路径
+   - 从临时文件读取路径
+   - 直接在 Python 代码中调用模块
+
+**集成到 `normalize_path`**：
+```python
+def normalize_path(raw_path: str, fix_encoding: bool = True) -> str:
+    # Step 1: Fix encoding issues
+    if fix_encoding:
+        raw_path = fix_chinese_path_encoding(raw_path)
+
+    # Step 2: Use pathlib to parse path
+    path = Path(raw_path).expanduser()
+    # ... 后续处理
+```
+
+**预防措施**：
+- Windows 环境下优先使用 ASCII 路径
+- 或使用配置文件传递中文路径
+- 所有 CLI 工具都应集成编码修复逻辑
