@@ -17,35 +17,7 @@
 
 ## 记录
 
-### 1. .iflowignore 机制
-**日期**：2026-04-11
-
-**问题**：`read_file` 工具无法读取 `.iflow/skills/*/SKILL.md` 文件，返回 "ignored by .iflowignore" 错误。
-
-**原因**：iFlow CLI 内部有 `.iflowignore` 机制，自动忽略 Skills 目录下的 SKILL.md 文件，防止上下文膨胀和循环引用。
-
-**解决方案**：
-- 使用 `run_shell_command` + `cat` 命令绕过限制
-- 或通过 `skill` 工具直接调用技能
-
-**预防措施**：读取 Skills 相关文件时，优先考虑使用 shell 命令或 skill 工具。
-
----
-
-### 2. 命令格式正确写法
-**日期**：2026-04-11
-
-**问题**：AGENTS.md 中命令格式写为 `/opsx:propose`，实际应为 `/opsx-propose`。
-
-**原因**：初期文档编写时未确认实际命令格式。
-
-**解决方案**：检查 `.iflow/commands/` 目录下的命令定义文件，确认正确格式为 `/opsx-propose`（使用连字符）。
-
-**预防措施**：引用命令时，先查看 `.iflow/commands/` 目录下的实际定义。
-
----
-
-### 3. 确认文件存在再移除引用
+### 1. 确认文件存在再移除引用
 **日期**：2026-04-11
 
 **问题**：因 `progress.txt` 和 `lessons.md` 文件不存在，错误地移除了 AGENTS.md 中对它们的引用。
@@ -58,7 +30,7 @@
 
 ---
 
-### 4. Skills 的 Windows 兼容性设计
+### 2. Skills 的 Windows 兼容性设计
 **日期**：2026-04-11
 
 **问题**：excel-auto-fill Skill 原本没有 Windows 支持，用户项目运行在 Windows 环境下。
@@ -93,7 +65,7 @@ python "%~dp0scripts\skill_name.py" %*
 
 ---
 
-### 5. 敏感信息切勿提交到代码仓库
+### 3. 敏感信息切勿提交到代码仓库
 **日期**：2026-04-11
 
 **问题**：AGENTS.md 中包含 GitHub Personal Access Token，推送到 GitHub 时被 Push Protection 拦截。
@@ -125,7 +97,7 @@ python "%~dp0scripts\skill_name.py" %*
 
 ---
 
-### 6. 时间过滤边界条件处理
+### 4. 时间过滤边界条件处理
 **日期**：2026-04-11
 
 **问题**：Isolation Forest 设置 `lookback_days=0` 时，返回 0 个异常，即使数据中存在明显异常。
@@ -148,7 +120,7 @@ cutoff_date = utc_now - timedelta(days=lookback_days) if lookback_days > 0 else 
 
 ---
 
-### 7. 不同方法的行为一致性
+### 5. 不同方法的行为一致性
 **日期**：2026-04-11
 
 **问题**：Z-Score 默认检测全部数据，Isolation Forest 默认只检测最近 30 天，导致报告不一致（报告显示"2年数据"但实际只检测了 18-19 个最近数据点）。
@@ -167,7 +139,7 @@ cutoff_date = utc_now - timedelta(days=lookback_days) if lookback_days > 0 else 
 
 ---
 
-### 8. SKILL.md 文档结构最佳实践
+### 6. SKILL.md 文档结构最佳实践
 **日期**：2026-04-11
 
 **问题**：SKILL.md 文档结构混乱，存在重复章节、内容分散、用户难以快速上手。
@@ -201,7 +173,7 @@ cutoff_date = utc_now - timedelta(days=lookback_days) if lookback_days > 0 else 
 
 ---
 
-### 9. 跨平台路径格式问题
+### 7. 跨平台路径格式问题
 **日期**：2026-04-12
 
 **问题**：系统注入的技能路径混合使用 Unix 风格 `~/` 和 Windows 风格 `\`，导致路径解析失败。
