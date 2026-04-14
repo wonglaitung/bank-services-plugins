@@ -2,7 +2,8 @@
 name: iflow-to-claude-migration
 description: Migration plan from iFlow CLI to Claude Code
 date: 2026-04-13
-status: approved
+status: completed
+completed-date: 2026-04-14
 ---
 
 # iFlow to Claude Code Migration
@@ -13,58 +14,31 @@ Migrate the Bank Services Plugins project from iFlow CLI to Claude Code by updat
 
 ## Current State
 
-- `.iflow/` files are staged for deletion
-- `.claude/` directory exists with migrated content (untracked)
-- `AGENTS.md` was deleted
-- `CLAUDE.md` still references `.iflow/` paths and "iFlow CLI"
+✅ 迁移已完成：
+- `.iflow/` 目录已删除
+- `.claude/` 目录已创建并包含迁移后的内容
+- `AGENTS.md` 已删除，被 `CLAUDE.md` 替代
+- 所有文档已更新，移除对 `.iflow/` 和 "iFlow CLI" 的引用
 
 ## Migration Scope
 
-### Files to Update
+### Files Updated
 
-| File | Changes Required |
-|------|-----------------|
-| `CLAUDE.md` | Update directory structure, paths, descriptions |
-| `.claude/skills/excel-auto-fill/SKILL.md` | Update path references |
-| `.claude/skills/anomaly-detector/SKILL.md` | Update path references |
-| `.claude/skills/openspec-*/SKILL.md` | Update path references |
+| File | Changes |
+|------|---------|
+| `CLAUDE.md` | 更新目录结构、路径、描述 |
+| `progress.txt` | 添加迁移完成记录 |
+| `lessons.md` | 删除过时的 iFlow 相关经验教训 |
 
-### Files to Remove
+### Files Removed
 
-- `.iflow/` directory (already staged)
-- `AGENTS.md` (already staged)
-
-## Detailed Changes
-
-### 1. CLAUDE.md
-
-- Project description: "iFlow CLI" → "Claude Code"
-- Directory structure: `.iflow/` → `.claude/`
-- Command descriptions: "iFlow 自定义命令" → "Claude Code 自定义命令"
-- Skill locations: Update all path references
-- Remove AGENTS.md reference in directory structure
-
-### 2. SKILL.md Files
-
-For each skill:
-- Update documentation path references from `.iflow/skills/` to `.claude/skills/`
-- Update "iFlow CLI 技能系统文档" link/reference
-
-### 3. No Code Changes
-
-Python source code, test files, and scripts remain unchanged - they work independently of the CLI system.
-
-## Implementation Tasks
-
-1. Update CLAUDE.md with new paths and descriptions
-2. Update excel-auto-fill/SKILL.md path references
-3. Update anomaly-detector/SKILL.md path references
-4. Update openspec SKILL.md files
-5. Stage and commit all changes
+- `.iflow/` directory
+- `AGENTS.md`
+- OpenSpec skills (openspec-propose, openspec-apply-change, openspec-archive-change, openspec-explore)
 
 ## Success Criteria
 
-- All documentation references `.claude/` instead of `.iflow/`
-- All mentions of "iFlow CLI" changed to "Claude Code"
-- Skills are invokable via Claude Code Skill tool
-- No broken documentation links
+- [x] All documentation references `.claude/` instead of `.iflow/`
+- [x] All mentions of "iFlow CLI" changed to "Claude Code"
+- [x] Skills are invokable via Claude Code Skill tool
+- [x] No broken documentation links
