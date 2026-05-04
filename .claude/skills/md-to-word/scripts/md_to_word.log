@@ -1,0 +1,12 @@
+2026-04-02 15:23:59 - md_to_word - DEBUG - 日志文件: C:\Users\gyyz-laitungwong\My Projects\AIAgentLab\openclaw_mini\skills\md-to-word\scripts\md_to_word.log
+2026-04-02 15:23:59 - md_to_word - INFO - 开始转换: C:\Users\gyyz-laitungwong\.openclaw\workspace\FX_Predict_文档.md
+2026-04-02 15:23:59 - md_to_word - DEBUG - 输出路径: C:\Users\gyyz-laitungwong\.openclaw\workspace\FX_Predict_文档.docx
+2026-04-02 15:23:59 - md_to_word - DEBUG - 读取文件: C:\Users\gyyz-laitungwong\.openclaw\workspace\FX_Predict_文档.md
+2026-04-02 15:23:59 - md_to_word - DEBUG - 文件大小: 9297 字符
+2026-04-02 15:23:59 - md_to_word - DEBUG - 解析 Markdown 内容
+2026-04-02 15:23:59 - md_to_word - DEBUG - 解析完成，共 130 个元素
+2026-04-02 15:23:59 - md_to_word - DEBUG - 创建 Word 文档
+2026-04-02 15:23:59 - md_to_word - DEBUG - 元素统计: {'heading': 41, 'paragraph': 29, 'unordered_list': 31, 'ordered_list': 13, 'code': 15, 'quote': 0, 'table': 1, 'hr': 0}
+2026-04-02 15:23:59 - md_to_word - DEBUG - 保存 Word 文档: C:\Users\gyyz-laitungwong\.openclaw\workspace\FX_Predict_文档.docx
+2026-04-02 15:23:59 - md_to_word - INFO - ✓ 已转换: C:\Users\gyyz-laitungwong\.openclaw\workspace\FX_Predict_文档.md -> C:\Users\gyyz-laitungwong\.openclaw\workspace\FX_Predict_文档.docx
+2026-04-02 15:23:59 - md_to_word - DEBUG - 转换完成
