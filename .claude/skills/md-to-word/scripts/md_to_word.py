@@ -154,8 +154,7 @@ def parse_markdown_to_elements(md_content: str) -> List[dict]:
 
         if paragraph_lines:
             paragraph_text = ' '.join(paragraph_lines).strip()
-            # 处理行内格式（粗体、斜体、代码、链接）
-            paragraph_text = process_inline_formatting(paragraph_text)
+            # 不在解析阶段处理行内格式，保留原始文本
             elements.append({
                 'type': 'paragraph',
                 'text': paragraph_text
@@ -164,19 +163,104 @@ def parse_markdown_to_elements(md_content: str) -> List[dict]:
     return elements
 
 
-def process_inline_formatting(text: str) -> str:
+def process_inline_formatting(text: str) -> list:
     """
-    处理行内格式（粗体、斜体、代码、链接）
+    处理行内格式（粗体、斜体、代码），返回 Run 对象配置列表
 
     Args:
-        text: 原始文本
+        text: 原始文本，包含 Markdown 格式标记
 
     Returns:
-        处理后的文本（保留 Markdown 格式标记，Word 会处理）
+        Run 配置列表，每个元素包含 (text, bold, italic, code) 属性
     """
-    # Word 会保留这些标记，后续在 Word 中可以进一步处理
-    # 如果需要完全转换，可以使用更复杂的逻辑
-    return text
+    runs = []
+    remaining = text
+
+    # 正则表达式匹配各种行内格式
+    # 注意：粗体 ** 必须在斜体 * 之前匹配，避免冲突
+    patterns = [
+        (r'\*\*(.+?)\*\*', {'bold': True}),      # 粗体 **text**
+        (r'\*(.+?)\*', {'italic': True}),        # 斜体 *text*
+        (r'`(.+?)`', {'code': True}),            # 行内代码 `code`
+    ]
+
+    while remaining:
+        # 找到最早匹配的格式
+        earliest_match = None
+        earliest_pos = len(remaining)
+        match_type = None
+
+        for pattern, style in patterns:
+            match = re.search(pattern, remaining)
+            if match and match.start() < earliest_pos:
+                earliest_match = match
+                earliest_pos = match.start()
+                match_type = style
+
+        if earliest_match:
+            # 添加匹配前的普通文本
+            if earliest_pos > 0:
+                runs.append({
+                    'text': remaining[:earliest_pos],
+                    'bold': False,
+                    'italic': False,
+                    'code': False
+                })
+
+            # 添加格式化文本
+            runs.append({
+                'text': earliest_match.group(1),
+                'bold': match_type.get('bold', False),
+                'italic': match_type.get('italic', False),
+                'code': match_type.get('code', False)
+            })
+
+            # 继续处理剩余文本
+            remaining = remaining[earliest_match.end():]
+        else:
+            # 没有更多格式标记，添加剩余文本
+            if remaining:
+                runs.append({
+                    'text': remaining,
+                    'bold': False,
+                    'italic': False,
+                    'code': False
+                })
+            break
+
+    return runs
+
+
+def add_formatted_paragraph(doc, text: str, base_size: int = 11):
+    """
+    添加带有行内格式的段落到 Word 文档
+
+    Args:
+        doc: Word 文档对象
+        text: 包含 Markdown 格式的文本
+        base_size: 基础字号
+    """
+    from docx.shared import Pt
+
+    p = doc.add_paragraph()
+    runs_config = process_inline_formatting(text)
+
+    for run_config in runs_config:
+        run = p.add_run(run_config['text'])
+
+        # 设置字体大小
+        run.font.size = Pt(base_size)
+
+        # 应用格式
+        if run_config['bold']:
+            run.font.bold = True
+        if run_config['italic']:
+            run.font.italic = True
+        if run_config['code']:
+            run.font.name = 'Courier New'
+            run.font.size = Pt(base_size - 1)  # 代码字体稍小
+
+    return p
 
 
 def setup_logging() -> logging.Logger:
@@ -287,23 +371,42 @@ def convert_to_word(md_path: str, output_path: Optional[str] = None) -> str:
             element_counts['heading'] += 1
 
         elif element['type'] == 'paragraph':
-            # 普通段落
-            p = doc.add_paragraph(element['text'])
-            p.style.font.size = Pt(11)
+            # 普通段落（支持行内格式）
+            add_formatted_paragraph(doc, element['text'], base_size=11)
             element_counts['paragraph'] += 1
 
         elif element['type'] == 'unordered_list':
-            # 无序列表
+            # 无序列表（支持行内格式）
             for item in element['items']:
-                p = doc.add_paragraph(item, style='List Bullet')
-                p.style.font.size = Pt(11)
+                p = doc.add_paragraph(style='List Bullet')
+                runs_config = process_inline_formatting(item)
+                for run_config in runs_config:
+                    run = p.add_run(run_config['text'])
+                    run.font.size = Pt(11)
+                    if run_config['bold']:
+                        run.font.bold = True
+                    if run_config['italic']:
+                        run.font.italic = True
+                    if run_config['code']:
+                        run.font.name = 'Courier New'
+                        run.font.size = Pt(10)
             element_counts['unordered_list'] += 1
 
         elif element['type'] == 'ordered_list':
-            # 有序列表
+            # 有序列表（支持行内格式）
             for item in element['items']:
-                p = doc.add_paragraph(item, style='List Number')
-                p.style.font.size = Pt(11)
+                p = doc.add_paragraph(style='List Number')
+                runs_config = process_inline_formatting(item)
+                for run_config in runs_config:
+                    run = p.add_run(run_config['text'])
+                    run.font.size = Pt(11)
+                    if run_config['bold']:
+                        run.font.bold = True
+                    if run_config['italic']:
+                        run.font.italic = True
+                    if run_config['code']:
+                        run.font.name = 'Courier New'
+                        run.font.size = Pt(10)
             element_counts['ordered_list'] += 1
 
         elif element['type'] == 'code':
@@ -317,10 +420,18 @@ def convert_to_word(md_path: str, output_path: Optional[str] = None) -> str:
             element_counts['code'] += 1
 
         elif element['type'] == 'quote':
-            # 引用
-            p = doc.add_paragraph(f"引用: {element['text']}")
-            p.style.font.size = Pt(11)
-            p.style.font.italic = True
+            # 引用（支持行内格式）
+            p = doc.add_paragraph()
+            runs_config = process_inline_formatting(element['text'])
+            for run_config in runs_config:
+                run = p.add_run(run_config['text'])
+                run.font.size = Pt(11)
+                run.font.italic = True  # 引用使用斜体
+                if run_config['bold']:
+                    run.font.bold = True
+                if run_config['code']:
+                    run.font.name = 'Courier New'
+                    run.font.size = Pt(10)
             p.paragraph_format.left_indent = Pt(20)
             element_counts['quote'] += 1
 
@@ -338,17 +449,34 @@ def convert_to_word(md_path: str, output_path: Optional[str] = None) -> str:
             # 填充表格内容
             for row_idx, row_data in enumerate(rows):
                 for col_idx, cell_text in enumerate(row_data):
-                    # 处理行内格式
-                    cell_text = process_inline_formatting(cell_text)
+                    cell = table.rows[row_idx].cells[col_idx]
 
-                    # 如果是表头，加粗
-                    if row_idx == 0:
-                        table.rows[row_idx].cells[col_idx].text = cell_text
-                        for paragraph in table.rows[row_idx].cells[col_idx].paragraphs:
-                            for run in paragraph.runs:
-                                run.font.bold = True
+                    # 处理行内格式
+                    runs_config = process_inline_formatting(cell_text)
+
+                    # 清空默认段落并添加格式化内容
+                    if cell.paragraphs:
+                        p = cell.paragraphs[0]
+                        p.clear()
                     else:
-                        table.rows[row_idx].cells[col_idx].text = cell_text
+                        p = cell.add_paragraph()
+
+                    for run_config in runs_config:
+                        run = p.add_run(run_config['text'])
+                        run.font.size = Pt(10)
+
+                        # 表头加粗
+                        if row_idx == 0:
+                            run.font.bold = True
+
+                        # 应用行内格式
+                        if run_config['bold']:
+                            run.font.bold = True
+                        if run_config['italic']:
+                            run.font.italic = True
+                        if run_config['code']:
+                            run.font.name = 'Courier New'
+                            run.font.size = Pt(9)
             element_counts['table'] += 1
 
         elif element['type'] == 'hr':
