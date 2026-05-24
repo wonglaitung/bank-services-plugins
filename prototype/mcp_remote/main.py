@@ -2,21 +2,32 @@
 远端 MCP 服务
 
 提供真正的 MCP 服务，定义所有 Tools。
-从 HTTP Header 获取用户编号，用于数据查询。
+从加密 Token 中解密获取用户编号，用于数据查询。
 
 关键安全原则：
 - Tools 不接受 user_id 参数
-- 用户编号从 Header 获取，由本地代理注入
+- 用户编号从加密 Token 解密获取
 - 所有数据查询强制使用当前用户编号
 """
 
 import os
+import sys
+import json
+import base64
 import logging
+from datetime import datetime, timezone
 from contextvars import ContextVar
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:
+    print("错误: 需要安装 cryptography 库")
+    print("运行: pip install cryptography")
+    sys.exit(1)
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -33,7 +44,65 @@ app = FastAPI(title="MCP 远端服务")
 
 # 配置
 BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8000")
-EXPECTED_TOKEN = os.environ.get("EXPECTED_TOKEN", "prototype-token")
+
+# Token 加密密钥（从环境变量读取）
+_TOKEN_KEY_B64 = os.environ.get("TOKEN_KEY")
+if _TOKEN_KEY_B64:
+    TOKEN_KEY = base64.b64decode(_TOKEN_KEY_B64)
+else:
+    # 原型测试时使用固定密钥（生产环境必须从环境变量读取）
+    TOKEN_KEY = b'prototype-test-key-32-bytes-!!!!'  # 32 bytes
+    logger.warning("使用测试密钥，生产环境请设置 TOKEN_KEY 环境变量")
+
+
+# ==================== Token 解密 ====================
+
+def decrypt_token(token_b64: str) -> dict:
+    """
+    解密 Token 获取用户身份
+
+    Args:
+        token_b64: Base64 编码的加密 Token
+
+    Returns:
+        包含 user_id, expires_at 的字典
+
+    Raises:
+        ValueError: Token 无效或过期
+    """
+    try:
+        # 1. Base64 解码
+        encrypted = base64.b64decode(token_b64)
+
+        # 2. 解析 nonce 和 ciphertext
+        if len(encrypted) < 12:
+            raise ValueError("Token 格式错误")
+        nonce = encrypted[:12]
+        ciphertext_with_tag = encrypted[12:]
+
+        # 3. AES-GCM 解密
+        aesgcm = AESGCM(TOKEN_KEY)
+        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
+
+        # 4. 解析 JSON
+        token_data = json.loads(plaintext.decode('utf-8'))
+
+        # 5. 验证必要字段
+        if 'user_id' not in token_data or 'expires_at' not in token_data:
+            raise ValueError("Token 缺少必要字段")
+
+        # 6. 验证有效期
+        expires_at_str = token_data['expires_at']
+        expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+        if datetime.now(timezone.utc) > expires_at:
+            raise ValueError("Token 已过期")
+
+        return token_data
+
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise
+        raise ValueError(f"Token 解密失败: {str(e)}")
 
 
 # ==================== 认证中间件 ====================
@@ -42,7 +111,7 @@ async def verify_request(request: Request) -> str:
     """
     验证请求并返回用户编号
 
-    从 HTTP Header 提取 Token 和用户编号，验证合法性。
+    从 Authorization Header 提取加密 Token，解密获取用户编号。
 
     Returns:
         验证通过的用户编号
@@ -50,23 +119,33 @@ async def verify_request(request: Request) -> str:
     Raises:
         HTTPException: 认证失败
     """
-    # 提取 Header
+    # 提取 Token
     auth_header = request.headers.get("Authorization", "")
-    user_id = request.headers.get("X-User-ID", "")
+    if auth_header.startswith("Bearer "):
+        token_b64 = auth_header[7:]  # 去掉 "Bearer " 前缀
+    else:
+        token_b64 = auth_header
 
-    # 验证 Token
-    token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else auth_header
-    if token != EXPECTED_TOKEN:
-        logger.warning(f"Token 验证失败: {token[:10]}...")
-        raise HTTPException(401, "Token 无效")
+    if not token_b64:
+        logger.warning("缺少认证 Token")
+        raise HTTPException(401, "缺少认证 Token")
 
-    # 验证用户编号格式（必须为9位数字）
-    if not user_id or not user_id.isdigit() or len(user_id) != 9:
-        logger.warning(f"用户编号格式错误: {user_id}")
-        raise HTTPException(400, "用户编号必须为9位数字")
+    try:
+        # 解密 Token
+        token_data = decrypt_token(token_b64)
+        user_id = token_data["user_id"]
 
-    logger.info(f"用户认证成功: {user_id}")
-    return user_id
+        # 验证用户编号格式（必须为9位数字）
+        if not user_id.isdigit() or len(user_id) != 9:
+            logger.warning(f"用户编号格式错误: {user_id}")
+            raise HTTPException(400, "用户编号格式错误")
+
+        logger.info(f"用户认证成功: {user_id}")
+        return user_id
+
+    except ValueError as e:
+        logger.warning(f"Token 验证失败: {e}")
+        raise HTTPException(401, str(e))
 
 
 # ==================== MCP Tools 定义 ====================
@@ -170,12 +249,12 @@ async def handle_mcp_request(request: Request):
     """
     处理 MCP JSON-RPC 请求
 
-    1. 验证认证信息
+    1. 验证认证信息（解密 Token）
     2. 注入用户上下文
     3. 根据 method 调用对应的 MCP 方法
     """
     try:
-        # 验证认证
+        # 验证认证（解密 Token 获取 user_id）
         user_id = await verify_request(request)
 
         # 注入用户上下文

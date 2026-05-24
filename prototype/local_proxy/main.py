@@ -3,14 +3,19 @@ MCP 协议透传代理
 
 本地代理作为 MCP JSON-RPC 协议的透明转发层：
 - 接收 Claude Code 的 MCP 请求 (Stdio)
-- 在每个请求中自动注入 Token 和用户编号
+- 在每个请求中自动注入加密 Token
 - 通过 HTTPS 转发到远端 MCP 服务
 - 返回远端服务的响应
 
 关键特性：
 - Tools 定义在远端服务，本地代理不定义任何工具
-- 添加/修改工具只需改远端服务，无需改本地代理
-- 用户编号和 Token 从环境变量读取，模型无法修改
+- 用户身份封装在加密 Token 中，本地代理无法查看
+- Token 从环境变量读取，模型无法修改
+
+安全设计：
+- 本地代理只知道 Token，不知道用户身份
+- 用户身份由远端服务从 Token 解密获取
+- 有效期由 Token 内部控制，无法绕过
 """
 
 import os
@@ -19,7 +24,6 @@ import json
 import logging
 import httpx
 import anyio
-from contextlib import asynccontextmanager
 
 from mcp.shared.message import SessionMessage
 import mcp.types as types
@@ -35,37 +39,26 @@ logger = logging.getLogger(__name__)
 
 def get_user_context() -> dict:
     """
-    从环境变量获取用户上下文
+    获取用户上下文
+
+    只读取 Token，不解密。用户身份由远端服务解密获取。
 
     Returns:
-        包含 user_id 和 token 的字典
+        包含 token 和 remote_url 的字典
 
     Raises:
         ValueError: 配置缺失
     """
-    user_id = os.environ.get("MCP_USER_ID")
     token = os.environ.get("MCP_AUTH_TOKEN")
     remote_url = os.environ.get("REMOTE_MCP_URL", "http://localhost:8001")
 
-    if not user_id:
-        raise ValueError("未配置用户编号，请设置环境变量 MCP_USER_ID")
     if not token:
         raise ValueError("未配置认证令牌，请设置环境变量 MCP_AUTH_TOKEN")
 
     return {
-        "user_id": user_id,
         "token": token,
         "remote_url": remote_url
     }
-
-
-def validate_user_context(ctx: dict):
-    """验证用户上下文格式"""
-    user_id = ctx["user_id"]
-    if not user_id.isdigit() or len(user_id) != 9:
-        raise ValueError(f"用户编号格式错误，必须为9位数字: {user_id}")
-
-    logger.info(f"用户上下文已加载: user_id={user_id}")
 
 
 async def forward_request(
@@ -88,7 +81,6 @@ async def forward_request(
             json=request.root.model_dump(by_alias=True, exclude_none=True),
             headers={
                 "Authorization": f"Bearer {ctx['token']}",
-                "X-User-ID": ctx["user_id"],
                 "Content-Type": "application/json"
             }
         )
@@ -107,9 +99,8 @@ async def forward_request(
 
 async def run_proxy():
     """运行代理主循环"""
-    # 获取并验证配置
+    # 获取配置
     ctx = get_user_context()
-    validate_user_context(ctx)
 
     logger.info(f"MCP 代理启动，目标: {ctx['remote_url']}")
 

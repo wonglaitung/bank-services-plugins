@@ -577,21 +577,21 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
 
 ### 8.3 本地代理实现代码
 
-> **重要提示**：MCP SDK v1.27+ 中 `FastMCP` 没有 `hook` 方法。本地代理需要使用 `anyio` 直接处理 stdin/stdout 流实现 JSON-RPC 消息透传。
+> **重要提示**：本地代理只传递加密 Token，不读取用户身份。用户身份由远端服务从 Token 解密获取。
 
 ```python
 """
 本地 MCP 代理 (Sidecar)
 
 职责：
-1. 从环境变量或凭证文件获取用户身份
+1. 从环境变量读取加密 Token
 2. 透传 MCP JSON-RPC 协议
-3. 在每个请求中自动注入认证 Header
+3. 在每个请求中自动注入 Token
 
-关键技术点：
-- 使用 anyio 处理 stdin/stdout 异步 I/O
-- JSON-RPC 消息透传，不依赖 FastMCP
-- 环境变量在启动时读取，运行时不可修改
+安全设计：
+- 本地代理只知道 Token，不知道用户身份
+- 用户身份由远端服务从 Token 解密获取
+- 有效期由 Token 内部控制，无法绕过
 """
 
 import os
@@ -617,26 +617,22 @@ def get_user_context() -> dict:
     """
     获取用户上下文
 
-    从凭证文件解密后获取员工编号和签名信息。
-    环境变量在启动时一次性读取，运行时不可修改。
+    只读取 Token，不解密。用户身份由远端服务解密获取。
 
     Returns:
-        包含 employee_id、signature、expires_at 的字典
+        包含 token 和 remote_url 的字典
+
+    Raises:
+        ValueError: 配置缺失
     """
-    employee_id = os.environ.get("MCP_EMPLOYEE_ID")
-    signature = os.environ.get("MCP_CREDENTIAL_SIGNATURE")
-    expires_at = os.environ.get("MCP_CREDENTIAL_EXPIRES")
+    token = os.environ.get("MCP_AUTH_TOKEN")
     remote_url = os.environ.get("REMOTE_MCP_URL", "http://localhost:8001")
 
-    if not employee_id:
-        raise ValueError("未配置员工编号，请设置环境变量 MCP_EMPLOYEE_ID")
-    if not signature:
-        raise ValueError("未配置凭证签名，请设置环境变量 MCP_CREDENTIAL_SIGNATURE")
+    if not token:
+        raise ValueError("未配置认证令牌，请设置环境变量 MCP_AUTH_TOKEN")
 
     return {
-        "employee_id": employee_id,
-        "signature": signature,
-        "expires_at": expires_at,
+        "token": token,
         "remote_url": remote_url
     }
 
@@ -660,9 +656,7 @@ async def forward_request(
             f"{ctx['remote_url']}/mcp",
             json=request.root.model_dump(by_alias=True, exclude_none=True),
             headers={
-                "X-Employee-ID": ctx["employee_id"],
-                "X-Credential-Signature": ctx["signature"],
-                "X-Credential-Expires": ctx["expires_at"],
+                "Authorization": f"Bearer {ctx['token']}",
                 "Content-Type": "application/json"
             }
         )
@@ -762,9 +756,7 @@ MCP 配置文件位置：
       "args": ["prototype/local_proxy/main.py"],
       "env": {
         "REMOTE_MCP_URL": "http://localhost:8001",
-        "MCP_EMPLOYEE_ID": "EMP00123",
-        "MCP_CREDENTIAL_SIGNATURE": "<签名>",
-        "MCP_CREDENTIAL_EXPIRES": "2026-05-24T18:00:00Z"
+        "MCP_AUTH_TOKEN": "<使用 generate_token.py 生成>"
       }
     }
   }
@@ -773,7 +765,8 @@ MCP 配置文件位置：
 
 **注意**：
 - `args` 中的路径必须使用**绝对路径**
-- 生产环境中的签名和过期时间从凭证文件解密获取
+- `MCP_AUTH_TOKEN` 使用 Token 生成工具生成
+- 用户身份封装在 Token 中，无需单独配置员工编号
 - 本地代理依赖：`mcp>=1.0.0`, `httpx>=0.25.0`, `anyio>=3.0.0`
 
 ---
