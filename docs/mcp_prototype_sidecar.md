@@ -713,7 +713,24 @@ async def handle_mcp_request(request: Request):
                 "id": request_id
             }
 
+        elif method == "notifications/initialized":
+            # initialized notification 不需要响应
+            logger.info(f"客户端初始化完成: user={user_id}")
+            return None
+
+        elif method == "ping":
+            # ping 请求
+            return {
+                "jsonrpc": "2.0",
+                "result": {},
+                "id": request_id
+            }
+
         else:
+            # 未知方法：notification 不返回错误，request 返回错误
+            if request_id is None:
+                logger.warning(f"忽略未知 notification: {method}")
+                return None
             return {
                 "jsonrpc": "2.0",
                 "error": {"code": -32601, "message": f"Method not found: {method}"},
