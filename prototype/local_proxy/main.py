@@ -23,10 +23,9 @@ import sys
 import json
 import logging
 import httpx
-import anyio
 
-from mcp.shared.message import SessionMessage
 import mcp.types as types
+from mcp.server.stdio import stdio_server
 
 # 配置日志
 logging.basicConfig(
@@ -104,51 +103,45 @@ async def run_proxy():
 
     logger.info(f"MCP 代理启动，目标: {ctx['remote_url']}")
 
-    # 使用 anyio 进行异步 I/O
-    async with anyio.create_task_group() as tg:
-        async with await anyio.open_file(sys.stdin.fileno(), "r") as stdin:
-            async with await anyio.open_file(sys.stdout.fileno(), "w") as stdout:
-                async for line in stdin:
-                    try:
-                        # 解析 JSON-RPC 消息
-                        message = types.JSONRPCMessage.model_validate_json(line)
+    # 使用 MCP SDK 的 stdio_server
+    async with stdio_server() as (read_stream, write_stream):
+        async for session_message in read_stream:
+            try:
+                message = session_message.message
 
-                        # 记录请求日志
-                        method = getattr(message.root, "method", "unknown")
-                        request_id = getattr(message.root, "id", "?")
-                        logger.info(f"转发 MCP 请求: method={method}, id={request_id}")
+                # 记录请求日志
+                method = getattr(message.root, "method", "unknown") if hasattr(message, 'root') else "unknown"
+                logger.info(f"转发 MCP 请求: method={method}")
 
-                        # 转发请求
-                        response = await forward_request(message, ctx)
+                # 转发请求
+                response = await forward_request(message, ctx)
 
-                        # 发送响应
-                        json_str = response.root.model_dump_json(by_alias=True, exclude_none=True)
-                        await stdout.write(json_str + "\n")
-                        await stdout.flush()
+                # 发送响应
+                from mcp.shared.message import SessionMessage
+                await write_stream.send(SessionMessage(response))
 
-                    except httpx.ConnectError as e:
-                        logger.error(f"无法连接远端服务: {e}")
-                        error_response = {
-                            "jsonrpc": "2.0",
-                            "error": {"code": -32603, "message": "无法连接远端服务"},
-                            "id": None
-                        }
-                        await stdout.write(json.dumps(error_response) + "\n")
-                        await stdout.flush()
+            except httpx.ConnectError as e:
+                logger.error(f"无法连接远端服务: {e}")
+                error_response = {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": "无法连接远端服务"},
+                    "id": None
+                }
+                await write_stream.send(SessionMessage(types.JSONRPCMessage.model_validate(error_response)))
 
-                    except Exception as e:
-                        logger.error(f"处理请求失败: {e}")
-                        error_response = {
-                            "jsonrpc": "2.0",
-                            "error": {"code": -32603, "message": f"内部错误: {str(e)}"},
-                            "id": None
-                        }
-                        await stdout.write(json.dumps(error_response) + "\n")
-                        await stdout.flush()
+            except Exception as e:
+                logger.error(f"处理请求失败: {e}")
+                error_response = {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": f"内部错误: {str(e)}"},
+                    "id": None
+                }
+                await write_stream.send(SessionMessage(types.JSONRPCMessage.model_validate(error_response)))
 
 
 def main():
     """主入口"""
+    import anyio
     try:
         anyio.run(run_proxy)
     except ValueError as e:
