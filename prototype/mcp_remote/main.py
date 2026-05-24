@@ -172,7 +172,7 @@ async def handle_mcp_request(request: Request):
 
     1. 验证认证信息
     2. 注入用户上下文
-    3. 转发给 MCP 服务处理
+    3. 根据 method 调用对应的 MCP 方法
     """
     try:
         # 验证认证
@@ -183,14 +183,53 @@ async def handle_mcp_request(request: Request):
 
         # 获取 MCP 请求体
         mcp_request = await request.json()
+        method = mcp_request.get("method", "")
+        request_id = mcp_request.get("id")
 
         # 记录审计日志
-        logger.info(f"MCP 请求: method={mcp_request.get('method')}, user={user_id}")
+        logger.info(f"MCP 请求: method={method}, user={user_id}")
 
-        # 转发给 MCP 服务处理
-        result = await mcp.handle_request(mcp_request)
+        # 根据 method 处理请求
+        if method == "tools/list":
+            # 返回工具列表
+            tools = await mcp.list_tools()
+            return {
+                "jsonrpc": "2.0",
+                "result": {"tools": tools},
+                "id": request_id
+            }
 
-        return result
+        elif method == "tools/call":
+            # 调用工具
+            params = mcp_request.get("params", {})
+            tool_name = params.get("name")
+            arguments = params.get("arguments", {})
+
+            result = await mcp.call_tool(tool_name, arguments)
+            return {
+                "jsonrpc": "2.0",
+                "result": {"content": [{"type": "text", "text": str(result)}]},
+                "id": request_id
+            }
+
+        elif method == "initialize":
+            # 初始化响应
+            return {
+                "jsonrpc": "2.0",
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "FinanceService", "version": "1.0.0"}
+                },
+                "id": request_id
+            }
+
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32601, "message": f"Method not found: {method}"},
+                "id": request_id
+            }
 
     except HTTPException as e:
         return JSONResponse(
@@ -201,7 +240,7 @@ async def handle_mcp_request(request: Request):
         logger.error(f"处理 MCP 请求失败: {e}")
         return JSONResponse(
             status_code=500,
-            content={"error": "内部服务器错误"}
+            content={"error": f"内部服务器错误: {str(e)}"}
         )
 
 
