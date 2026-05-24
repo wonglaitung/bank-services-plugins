@@ -633,57 +633,100 @@ async def verify_employee_headers(request: Request) -> str:
 
 ## 9. MCP Server 集成
 
-### 9.1 中间件集成
+### 9.1 服务架构
 
-```python
-from fastapi import FastAPI, Depends, Request
-from contextvars import ContextVar
-from mcp.server.fastmcp import FastMCP
+MCP Server 使用 FastAPI 作为 HTTP 层，FastMCP 作为 MCP 协议处理层：
 
-# 当前员工上下文
-current_employee_id: ContextVar[str] = ContextVar("current_employee_id")
-
-app = FastAPI()
-mcp = FastMCP("SecureFinanceService")
-
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    """认证中间件：验证 HTTP Header 并注入上下文"""
-
-    # 跳过非 MCP 路径 (如健康检查)
-    if not request.url.path.startswith("/mcp"):
-        return await call_next(request)
-
-    try:
-        employee_id = await verify_employee_headers(request)
-        current_employee_id.set(employee_id)
-    except HTTPException as e:
-        return JSONResponse(
-            status_code=e.status_code,
-            content={"error": e.detail}
-        )
-
-    return await call_next(request)
+```
+HTTP 请求 → FastAPI 中间件（认证） → MCP JSON-RPC 处理 → Tool 执行
 ```
 
-### 9.2 工具函数安全封装
+### 9.2 完整服务实现
 
 ```python
-def get_current_employee_id() -> str:
-    """获取当前已认证的员工编号"""
-    employee_id = current_employee_id.get(None)
-    if not employee_id:
-        raise RuntimeError("未找到员工身份上下文")
+import os
+import logging
+from contextvars import ContextVar
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+import httpx
+from mcp.server.fastmcp import FastMCP
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 当前员工上下文（每个请求独立）
+current_employee_id: ContextVar[str] = ContextVar("current_employee_id")
+
+# 创建 MCP 服务
+mcp = FastMCP("SecureFinanceService")
+
+# FastAPI 应用
+app = FastAPI(title="MCP 安全认证服务")
+
+# RSA 公钥（用于验证签名）
+PUBLIC_KEY = load_public_key()  # 从配置加载
+
+
+# ==================== 认证验证 ====================
+
+async def verify_employee_headers(request: Request) -> str:
+    """
+    验证 HTTP Header 中的员工身份
+
+    Returns:
+        验证通过的员工编号
+
+    Raises:
+        HTTPException: 认证失败
+    """
+    employee_id = request.headers.get("X-Employee-ID")
+    signature_b64 = request.headers.get("X-Credential-Signature")
+    expires_at_str = request.headers.get("X-Credential-Expires")
+
+    # 1. 检查必要 Header
+    if not all([employee_id, signature_b64, expires_at_str]):
+        raise HTTPException(401, "缺少认证信息")
+
+    # 2. 检查有效期
+    try:
+        expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+        if datetime.now(timezone.utc) > expires_at:
+            raise HTTPException(401, "凭证已过期")
+    except ValueError:
+        raise HTTPException(400, "无效的过期时间格式")
+
+    # 3. 验证签名
+    sign_content = f"{employee_id}:{expires_at_str}"
+    try:
+        signature = base64.b64decode(signature_b64)
+        PUBLIC_KEY.verify(
+            signature,
+            sign_content.encode('utf-8'),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+    except Exception:
+        raise HTTPException(401, "签名验证失败")
+
+    logger.info(f"员工认证成功: {employee_id}")
     return employee_id
 
+
+# ==================== MCP Tools 定义 ====================
+
 @mcp.tool()
-def get_my_balance() -> dict:
+async def get_my_balance() -> dict:
     """
     获取当前用户的账户余额
 
     注意：不接受任何用户标识参数，身份从上下文获取
     """
-    employee_id = get_current_employee_id()
+    employee_id = current_employee_id.get()
 
     # 数据库查询强制使用当前员工编号
     return db.query(
@@ -691,8 +734,9 @@ def get_my_balance() -> dict:
         employee_id
     )
 
+
 @mcp.tool()
-def get_my_transactions(month: str, limit: int = 10) -> list:
+async def get_my_transactions(month: str, limit: int = 10) -> list:
     """
     获取当前用户的交易记录
 
@@ -700,7 +744,7 @@ def get_my_transactions(month: str, limit: int = 10) -> list:
         month: 月份，格式 YYYY-MM
         limit: 返回记录数量限制
     """
-    employee_id = get_current_employee_id()
+    employee_id = current_employee_id.get()
 
     return db.query(
         """SELECT date, amount, type, description
@@ -710,12 +754,13 @@ def get_my_transactions(month: str, limit: int = 10) -> list:
         employee_id, f"{month}%", limit
     )
 
+
 @mcp.tool()
-def get_department_summary() -> dict:
+async def get_department_summary() -> dict:
     """
     获取部门财务汇总（需要管理员权限）
     """
-    employee_id = get_current_employee_id()
+    employee_id = current_employee_id.get()
 
     # 权限检查
     user_roles = get_user_roles(employee_id)
@@ -725,8 +770,115 @@ def get_department_summary() -> dict:
     # 记录审计日志
     log_audit(actor=employee_id, action="view_department_summary")
 
-    return db.query("SELECT * FROM department_summary WHERE dept = ?",
-                    get_user_department(employee_id))
+    return db.query(
+        "SELECT * FROM department_summary WHERE dept = ?",
+        get_user_department(employee_id)
+    )
+
+
+# ==================== MCP 请求端点 ====================
+
+@app.post("/mcp")
+async def handle_mcp_request(request: Request):
+    """
+    处理 MCP JSON-RPC 请求
+
+    1. 验证认证信息
+    2. 注入员工上下文
+    3. 根据 method 调用对应的 MCP 方法
+    """
+    try:
+        # 验证认证
+        employee_id = await verify_employee_headers(request)
+
+        # 注入员工上下文
+        current_employee_id.set(employee_id)
+
+        # 获取 MCP 请求体
+        mcp_request = await request.json()
+        method = mcp_request.get("method", "")
+        request_id = mcp_request.get("id")
+
+        # 记录审计日志
+        logger.info(f"MCP 请求: method={method}, employee={employee_id}")
+
+        # 根据 method 处理请求
+        if method == "tools/list":
+            # 返回工具列表
+            tools = await mcp.list_tools()
+            return {
+                "jsonrpc": "2.0",
+                "result": {"tools": tools},
+                "id": request_id
+            }
+
+        elif method == "tools/call":
+            # 调用工具
+            params = mcp_request.get("params", {})
+            tool_name = params.get("name")
+            arguments = params.get("arguments", {})
+
+            result = await mcp.call_tool(tool_name, arguments)
+            return {
+                "jsonrpc": "2.0",
+                "result": {"content": [{"type": "text", "text": str(result)}]},
+                "id": request_id
+            }
+
+        elif method == "initialize":
+            # 初始化响应
+            return {
+                "jsonrpc": "2.0",
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "SecureFinanceService", "version": "1.0.0"}
+                },
+                "id": request_id
+            }
+
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32601, "message": f"Method not found: {method}"},
+                "id": request_id
+            }
+
+    except HTTPException as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"error": e.detail}
+        )
+    except Exception as e:
+        logger.error(f"处理 MCP 请求失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"内部服务器错误: {str(e)}"}
+        )
+
+
+@app.get("/health")
+async def health():
+    """健康检查"""
+    return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
+```
+
+### 9.3 关键实现要点
+
+| 要点 | 说明 |
+|------|------|
+| **FastMCP API** | 使用 `mcp.list_tools()` 和 `mcp.call_tool()` 处理 JSON-RPC |
+| **ContextVar** | 确保每个请求的用户身份独立，不跨请求共享 |
+| **JSON-RPC 2.0** | 响应必须包含 `jsonrpc`、`result`/`error`、`id` 字段 |
+| **认证前置** | 在调用 MCP 方法前完成认证，失败直接返回 401 |
+| **工具签名** | 工具函数不接受 `user_id` 参数，从上下文获取 |
+
+### 9.4 工具函数设计原则
 ```
 
 ---
