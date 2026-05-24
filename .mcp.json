@@ -5,7 +5,7 @@
       "args": ["/data/bank-services-plugins/prototype/local_proxy/main.py"],
       "env": {
         "REMOTE_MCP_URL": "http://localhost:8001",
-        "MCP_AUTH_TOKEN": "<使用 prototype/tools/generate_token.py 生成>"
+        "MCP_AUTH_TOKEN": "TOJvJYpY6XWz2NHZB1Nv60/py1Hdez4PEzt10FveHqzoVdKOPFCmYmfycPlY5CRrLwZvfiJ50WNsNQ7qhh5tjeMi6DxKnf7rD4hjtUBI6pxYVGfw2cyiibG2gsA0OfH8XIDLV5NIOgX4iw/sbh8zgbNruNFZy2osc9GZxfvyAg=="
       }
     }
   }
