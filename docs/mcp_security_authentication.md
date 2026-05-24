@@ -9,15 +9,16 @@
 5. [整体架构](#5-整体架构)
 6. [凭证文件设计](#6-凭证文件设计)
 7. [加密方案详解](#7-加密方案详解)
-8. [身份传递与验证](#8-身份传递与验证)
-9. [MCP Server 集成](#9-mcp-server-集成)
-10. [安全特性总结](#10-安全特性总结)
-11. [密钥管理](#11-密钥管理)
-12. [可选增强功能](#12-可选增强功能)
-13. [部署架构](#13-部署架构)
-14. [配置参数建议](#14-配置参数建议)
-15. [完整代码示例](#15-完整代码示例)
-16. [参考资料](#16-参考资料)
+8. [本地代理层实现](#8-本地代理层实现)
+9. [身份传递与验证](#9-身份传递与验证)
+10. [MCP Server 集成](#10-mcp-server-集成)
+11. [安全特性总结](#11-安全特性总结)
+12. [密钥管理](#12-密钥管理)
+13. [可选增强功能](#13-可选增强功能)
+14. [部署架构](#14-部署架构)
+15. [配置参数建议](#15-配置参数建议)
+16. [完整代码示例](#16-完整代码示例)
+17. [参考资料](#17-参考资料)
 
 ---
 
@@ -207,18 +208,81 @@ get_my_monthly_report(month="2026-05")
 
 ## 4. 方案概述
 
-采用**双层加密凭证 + 客户端密码输入**方案：
+采用 **Sidecar 模式 + 双层加密凭证** 方案：
 
 | 组件 | 职责 |
 |------|------|
 | 独立认证系统 | 验证用户身份，生成加密凭证 |
 | 本地凭证存储 | 用户保存凭证文件到本地 |
-| 自定义客户端 | 启动时输入密码解密凭证，将员工编号注入 MCP 请求 |
-| MCP Server | 从请求上下文获取员工编号，用于数据查询 |
+| **本地代理层 (Sidecar)** | 启动时输入密码解密凭证，注入认证 Header，透传 MCP 协议 |
+| 远端 MCP 服务 | 验证认证信息，执行业务逻辑 |
+| 后台 API | 数据查询和处理 |
+
+### 4.1 Sidecar 模式核心价值
+
+原型验证证明，Sidecar 模式是实现 IDOR 防护的关键架构：
+
+| 优势 | 说明 |
+|------|------|
+| **身份隔离** | 用户编号在本地代理注入，模型无法修改 |
+| **Tools 自动发现** | 本地代理透传 MCP 协议，Claude Code 可自动发现远端工具 |
+| **安全集中** | 认证逻辑集中在本地代理，业务服务无需处理凭证解密 |
+| **协议透明** | 本地代理不感知具体业务，只负责认证注入 |
 
 ---
 
 ## 5. 整体架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              用户本地机器                                    │
+│                                                                             │
+│  ┌─────────────────┐      ┌─────────────────────────────────────────┐       │
+│  │  Claude Code    │      │  本地代理层 (Sidecar)                    │       │
+│  │                 │      │                                         │       │
+│  │ ┌─────────────┐ │      │  启动流程:                               │       │
+│  │ │ MCP 配置    │ │      │  1. 读取凭证文件 (credential.enc)        │       │
+│  │ │ 连接到本地   │ │      │  2. 终端提示输入密码 (getpass)           │       │
+│  │ │ Stdio       │ │      │  3. AES 解密凭证                         │       │
+│  │ └──────┬──────┘ │      │  4. RSA 验证签名                         │       │
+│  │        │        │      │  5. 验证有效期                           │       │
+│  │        │ Stdio  │      │                                         │       │
+│  │        │ (本地) │      │  运行时职责:                             │       │
+│  │        ├────────▶│      │  • 透传 MCP JSON-RPC 协议               │       │
+│  │                 │      │  • 自动注入 HTTP Header                  │       │
+│  │                 │      │  • 记录调用日志                          │       │
+│  │                 │      │                                         │       │
+│  │                 │      │        │                                │       │
+│  └─────────────────┘      │        │ HTTPS                          │       │
+│                           │        │ + 认证 Header                   │       │
+│                           │        ▼                                │       │
+│                           └─────────────────────────────────────────┘       │
+│                                      │                                      │
+└──────────────────────────────────────┼──────────────────────────────────────┘
+                                       │
+                                       │ HTTPS (加密通信)
+                                       │ Authorization: Bearer <Token>
+                                       │ X-Employee-ID: <员工编号>
+                                       │ X-Credential-Signature: <签名>
+                                       │ X-Credential-Expires: <过期时间>
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              公司服务器                                      │
+│                                                                             │
+│  ┌─────────────────┐      ┌─────────────────┐                              │
+│  │  远端 MCP 服务   │      │  后台 API       │                              │
+│  │                 │      │  (业务逻辑)     │                              │
+│  │  • 验证签名     │      │                 │                              │
+│  │  • 检查有效期   │◀────▶│  • 用户查询     │                              │
+│  │  • 执行 Tools   │      │  • 数据库访问   │                              │
+│  │  • 审计日志     │      │                 │                              │
+│  │                 │      │                 │                              │
+│  └─────────────────┘      └─────────────────┘                              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.1 认证系统架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -243,68 +307,7 @@ get_my_monthly_report(month="2026-05")
 │                                              (用户下载保存到本地)            │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      │ 用户保存到本地
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                                                             │
-│  【自定义客户端】                                                            │
-│                                                                             │
-│   配置文件: client_config.json                                               │
-│   ┌─────────────────────────────────────────────────────────────────────┐  │
-│   │  {                                                                   │  │
-│   │    "credential_path": "~/.mcp/credential.enc",                      │  │
-│   │    "public_key_path": "~/.mcp/public_key.pem",                      │  │
-│   │    "mcp_server_url": "http://mcp-server:8000/sse"                   │  │
-│   │  }                                                                   │  │
-│   └─────────────────────────────────────────────────────────────────────┘  │
-│                                                                             │
-│   启动流程:                                                                  │
-│   ┌─────────────────────────────────────────────────────────────────────┐  │
-│   │  1. 读取配置文件                                                      │  │
-│   │  2. 读取凭证文件                                                      │  │
-│   │  3. 终端提示: "请输入凭证密码: " (getpass，不回显)                     │  │
-│   │  4. 密码解密外层 (AES-256-GCM)                                        │  │
-│   │  5. 公钥验证签名 (RSA)                                                │  │
-│   │  6. 验证有效期                                                        │  │
-│   │  7. 提取: 员工编号 + 签名 + 有效期                                     │  │
-│   │  8. 构建HTTP Header，连接 MCP Server                                  │  │
-│   └─────────────────────────────────────────────────────────────────────┘  │
-│                                                                             │
-│                                      │                                      │
-│                                      │ HTTP Header:                         │
-│                                      │ - X-Employee-ID                      │
-│                                      │ - X-Credential-Signature             │
-│                                      │ - X-Credential-Expires               │
-│                                      ▼                                      │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                       │
-                                       │ SSE (HTTP)
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                                                             │
-│  【MCP Server】                                                              │
-│                                                                             │
-│   中间件验证:                                                                │
-│   ┌─────────────────────────────────────────────────────────────────────┐  │
-│   │  def verify_employee_id(request):                                    │  │
-│   │      employee_id = request.headers.get("X-Employee-ID")              │  │
-│   │      signature = request.headers.get("X-Credential-Signature")       │  │
-│   │      expires_at = request.headers.get("X-Credential-Expires")        │  │
-│   │                                                                       │  │
-│   │      # 1. 检查有效期                                                  │  │
-│   │      if expired(expires_at):                                         │  │
-│   │          raise AuthError("凭证已过期")                                 │  │
-│   │                                                                       │  │
-│   │      # 2. 验证签名 (RSA公钥)                                          │  │
-│   │      if not verify_signature(employee_id, expires_at, signature):    │  │
-│   │          raise AuthError("签名验证失败")                               │  │
-│   │                                                                       │  │
-│   │      return employee_id                                              │  │
-│   └─────────────────────────────────────────────────────────────────────┘  │
-│                                                                             │
-│   工具函数 (安全封装):                                                       │
-│   ┌─────────────────────────────────────────────────────────────────────┐  │
+```
 │   │  @mcp.tool()                                                         │  │
 │   │  def get_my_balance() -> dict:                                       │  │
 │   │      employee_id = get_current_employee_id()  # 从上下文获取          │  │
@@ -538,9 +541,135 @@ def decrypt_and_verify(encrypted_data: bytes, password: str, public_key) -> dict
 
 ---
 
-## 8. 身份传递与验证
+## 8. 本地代理层实现
 
-### 8.1 客户端请求头
+本地代理层（Sidecar）是 Sidecar 模式的核心组件，原型验证了以下关键实现。
+
+### 8.1 本地代理职责
+
+| 职责 | 说明 |
+|------|------|
+| **凭证解密** | 启动时从用户输入密码解密凭证文件 |
+| **身份注入** | 在每个 HTTP 请求中自动注入认证 Header |
+| **协议透传** | 透传 MCP JSON-RPC 协议，不定义任何工具 |
+| **调用日志** | 记录所有 MCP 调用用于审计 |
+
+### 8.2 MCP 协议透传原理
+
+```
+Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 MCP 服务
+    │                        │                      │
+    │    MCP 协议 (JSON-RPC)  │     HTTP + Header    │
+    │                        │                      │
+    │  tools/list ──────────────────────────────────▶ 定义在远端
+    │  tools/call ──────────────────────────────────▶ 执行在远端
+    │                        │                      │
+    │                        │  自动注入:           │
+    │                        │  • X-Employee-ID     │
+    │                        │  • X-Credential-Sig  │
+    │                        │  • X-Credential-Exp  │
+```
+
+**关键点**：
+- 本地代理不定义任何工具，所有工具定义在远端服务
+- Claude Code 通过本地代理自动发现远端工具
+- 用户编号和签名在本地代理注入，模型无法修改
+
+### 8.3 本地代理实现代码
+
+```python
+"""
+本地 MCP 代理 (Sidecar)
+
+职责：
+1. 从环境变量或凭证文件获取用户身份
+2. 透传 MCP JSON-RPC 协议
+3. 在每个请求中自动注入认证 Header
+"""
+
+import sys
+import json
+import httpx
+from mcp.server.fastmcp import FastMCP
+
+# 创建代理（不定义任何工具）
+mcp = FastMCP("MCPProxy")
+
+def get_user_context() -> dict:
+    """
+    获取用户上下文
+
+    从凭证文件解密后获取员工编号和签名信息
+    """
+    # 实际实现中从解密的凭证文件获取
+    employee_id = os.environ.get("MCP_EMPLOYEE_ID")
+    signature = os.environ.get("MCP_CREDENTIAL_SIGNATURE")
+    expires_at = os.environ.get("MCP_CREDENTIAL_EXPIRES")
+
+    return {
+        "employee_id": employee_id,
+        "signature": signature,
+        "expires_at": expires_at
+    }
+
+def forward_to_remote(mcp_request: dict) -> dict:
+    """
+    转发 MCP 请求到远端服务
+
+    Args:
+        mcp_request: MCP JSON-RPC 请求
+
+    Returns:
+        远端服务的响应
+    """
+    ctx = get_user_context()
+    remote_url = os.environ.get("REMOTE_MCP_URL", "http://localhost:8001")
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{remote_url}/mcp",
+            json=mcp_request,
+            headers={
+                "X-Employee-ID": ctx["employee_id"],
+                "X-Credential-Signature": ctx["signature"],
+                "X-Credential-Expires": ctx["expires_at"],
+                "Content-Type": "application/json"
+            }
+        )
+        return response.json()
+
+# MCP 协议处理（拦截并转发）
+# 实际实现中需要处理 stdin/stdout 的 MCP 协议流
+
+if __name__ == "__main__":
+    # 使用 Stdio 协议运行代理
+    mcp.run(transport="stdio")
+```
+
+### 8.4 Claude Code 配置
+
+```json
+{
+  "mcpServers": {
+    "finance-proxy": {
+      "command": "python",
+      "args": ["prototype/local_proxy/main.py"],
+      "env": {
+        "REMOTE_MCP_URL": "http://localhost:8001",
+        "MCP_EMPLOYEE_ID": "EMP00123",
+        "MCP_CREDENTIAL_SIGNATURE": "<签名>",
+        "MCP_CREDENTIAL_EXPIRES": "2026-05-24T18:00:00Z"
+      }
+    }
+  }
+}
+```
+
+---
+
+## 9. 身份传递与验证
+
+### 9.1 客户端请求头
 
 ```
 POST /sse HTTP/1.1
@@ -557,7 +686,7 @@ X-Credential-Expires: 2026-05-24T18:00:00Z
 | X-Credential-Signature | RSA 签名 (Base64) | YWJjZGVm... |
 | X-Credential-Expires | 凭证过期时间 (ISO 8601) | 2026-05-24T18:00:00Z |
 
-### 8.2 服务端验证逻辑
+### 9.2 服务端验证逻辑
 
 ```python
 from fastapi import Request, HTTPException
@@ -608,7 +737,7 @@ async def verify_employee_headers(request: Request) -> str:
     return employee_id
 ```
 
-### 8.3 签名防伪造原理
+### 9.3 签名防伪造原理
 
 ```
 攻击场景: 黑客尝试伪造 HTTP Header
@@ -631,7 +760,7 @@ async def verify_employee_headers(request: Request) -> str:
 
 ---
 
-## 9. MCP Server 集成
+## 10. MCP Server 集成
 
 ### 9.1 服务架构
 
@@ -883,7 +1012,7 @@ if __name__ == "__main__":
 
 ---
 
-## 10. 安全特性总结
+## 11. 安全特性总结
 
 | 安全威胁 | 防御机制 | 实现位置 |
 |----------|----------|----------|
@@ -897,9 +1026,9 @@ if __name__ == "__main__":
 
 ---
 
-## 11. 密钥管理
+## 12. 密钥管理
 
-### 11.1 RSA 密钥对
+### 12.1 RSA 密钥对
 
 ```python
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -926,7 +1055,7 @@ public_pem = public_key.public_bytes(
 )
 ```
 
-### 11.2 密钥存储位置
+### 12.2 密钥存储位置
 
 | 密钥 | 存储位置 | 访问权限 |
 |------|----------|----------|
@@ -936,7 +1065,7 @@ public_pem = public_key.public_bytes(
 
 ---
 
-## 12. 可选增强功能
+## 13. 可选增强功能
 
 ### 12.1 机器绑定
 
@@ -1004,7 +1133,7 @@ def record_retry(identifier: str):
 
 ---
 
-## 13. 部署架构
+## 14. 部署架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -1042,7 +1171,7 @@ def record_retry(identifier: str):
 
 ---
 
-## 14. 配置参数建议
+## 15. 配置参数建议
 
 | 参数 | 建议值 | 说明 |
 |------|--------|------|
@@ -1055,7 +1184,7 @@ def record_retry(identifier: str):
 
 ---
 
-## 15. 完整代码示例
+## 16. 完整代码示例
 
 ### 15.1 认证系统 - 凭证生成
 
@@ -1388,7 +1517,7 @@ def get_current_employee_id() -> str:
 
 ---
 
-## 16. 参考资料
+## 17. 参考资料
 
 - [MCP (Model Context Protocol) 官方文档](https://modelcontextprotocol.io/)
 - [cryptography 库文档](https://cryptography.io/)
