@@ -784,10 +784,9 @@ import sys
 import json
 import logging
 import httpx
-import anyio
 
-from mcp.shared.message import SessionMessage
 import mcp.types as types
+from mcp.server.stdio import stdio_server
 
 # 配置日志
 logging.basicConfig(
@@ -825,7 +824,7 @@ def get_user_context() -> dict:
 async def forward_request(
     request: types.JSONRPCMessage,
     ctx: dict
-) -> types.JSONRPCMessage:
+) -> types.JSONRPCMessage | None:
     """
     转发 MCP 请求到远端服务
 
@@ -834,12 +833,21 @@ async def forward_request(
         ctx: 用户上下文
 
     Returns:
-        远端服务的响应
+        远端服务的响应，notification 返回 None
     """
+    # 获取请求数据
+    request_data = request.root.model_dump(by_alias=True, exclude_none=True)
+
+    # notification 类型消息（没有 id）不需要响应
+    if "id" not in request_data or request_data["id"] is None:
+        # 但仍需转发到远端
+        method = request_data.get("method", "unknown")
+        logger.info(f"转发 MCP notification: method={method}")
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             f"{ctx['remote_url']}/mcp",
-            json=request.root.model_dump(by_alias=True, exclude_none=True),
+            json=request_data,
             headers={
                 "Authorization": f"Bearer {ctx['token']}",
                 "Content-Type": "application/json"
@@ -851,64 +859,71 @@ async def forward_request(
             error_response = {
                 "jsonrpc": "2.0",
                 "error": {"code": -32603, "message": f"远端服务错误: {response.status_code}"},
-                "id": request.root.id
+                "id": request_data.get("id")
             }
             return types.JSONRPCMessage.model_validate(error_response)
 
-        return types.JSONRPCMessage.model_validate(response.json())
+        response_data = response.json()
+
+        # notification 不需要响应
+        if "id" not in request_data or request_data["id"] is None:
+            return None
+
+        return types.JSONRPCMessage.model_validate(response_data)
 
 
 async def run_proxy():
     """运行代理主循环"""
+    # 获取配置
     ctx = get_user_context()
 
     logger.info(f"MCP 代理启动，目标: {ctx['remote_url']}")
 
-    # 使用 anyio 进行异步 I/O
-    async with anyio.create_task_group() as tg:
-        async with await anyio.open_file(sys.stdin.fileno(), "r") as stdin:
-            async with await anyio.open_file(sys.stdout.fileno(), "w") as stdout:
-                async for line in stdin:
-                    try:
-                        # 解析 JSON-RPC 消息
-                        message = types.JSONRPCMessage.model_validate_json(line)
+    # 使用 MCP SDK 的 stdio_server
+    async with stdio_server() as (read_stream, write_stream):
+        async for session_message in read_stream:
+            try:
+                message = session_message.message
 
-                        # 记录请求日志
-                        method = getattr(message.root, "method", "unknown")
-                        request_id = getattr(message.root, "id", "?")
-                        logger.info(f"转发 MCP 请求: method={method}, id={request_id}")
+                # 记录请求日志
+                request_data = message.root.model_dump(by_alias=True, exclude_none=True)
+                method = request_data.get("method", "unknown")
+                msg_id = request_data.get("id")
+                logger.info(f"转发 MCP 请求: method={method}, id={msg_id}")
 
-                        # 转发请求
-                        response = await forward_request(message, ctx)
+                # 转发请求
+                response = await forward_request(message, ctx)
 
-                        # 发送响应
-                        json_str = response.root.model_dump_json(by_alias=True, exclude_none=True)
-                        await stdout.write(json_str + "\n")
-                        await stdout.flush()
+                # notification 不需要发送响应
+                if response is None:
+                    continue
 
-                    except httpx.ConnectError as e:
-                        logger.error(f"无法连接远端服务: {e}")
-                        error_response = {
-                            "jsonrpc": "2.0",
-                            "error": {"code": -32603, "message": "无法连接远端服务"},
-                            "id": None
-                        }
-                        await stdout.write(json.dumps(error_response) + "\n")
-                        await stdout.flush()
+                # 发送响应
+                from mcp.shared.message import SessionMessage
+                await write_stream.send(SessionMessage(response))
 
-                    except Exception as e:
-                        logger.error(f"处理请求失败: {e}")
-                        error_response = {
-                            "jsonrpc": "2.0",
-                            "error": {"code": -32603, "message": f"内部错误: {str(e)}"},
-                            "id": None
-                        }
-                        await stdout.write(json.dumps(error_response) + "\n")
-                        await stdout.flush()
+            except httpx.ConnectError as e:
+                logger.error(f"无法连接远端服务: {e}")
+                error_response = {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": "无法连接远端服务"},
+                    "id": None
+                }
+                await write_stream.send(SessionMessage(types.JSONRPCMessage.model_validate(error_response)))
+
+            except Exception as e:
+                logger.error(f"处理请求失败: {e}")
+                error_response = {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": f"内部错误: {str(e)}"},
+                    "id": None
+                }
+                await write_stream.send(SessionMessage(types.JSONRPCMessage.model_validate(error_response)))
 
 
 def main():
     """主入口"""
+    import anyio
     try:
         anyio.run(run_proxy)
     except ValueError as e:
