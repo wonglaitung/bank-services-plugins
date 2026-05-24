@@ -983,3 +983,289 @@ async def new_tool_name(param1: str, param2: int = 10) -> dict:
 5. **监控告警**
    - 异常请求检测
    - 自动告警
+
+---
+
+## 9. 测试方法与经验
+
+### 9.1 服务健康检查
+
+```bash
+# 测试后台 API 健康检查
+curl -s http://localhost:8000/health
+# 预期返回: {"status":"ok"}
+
+# 测试远端 MCP 服务健康检查
+curl -s http://localhost:8001/health
+# 预期返回: {"status":"ok"}
+```
+
+### 9.2 后台 API 用户查询测试
+
+```bash
+# 测试查询存在的用户
+curl -s http://localhost:8000/api/user/000000001 | python3 -m json.tool
+# 预期返回:
+# {
+#     "user_id": "000000001",
+#     "name": "张三",
+#     "department": "财务部",
+#     "role": "viewer",
+#     "balance": 125000.0
+# }
+
+# 测试查询不存在的用户
+curl -s http://localhost:8000/api/user/999999999 | python3 -m json.tool
+# 预期返回: {"detail": "用户不存在"}
+
+# 测试格式错误的用户编号
+curl -s http://localhost:8000/api/user/123 | python3 -m json.tool
+# 预期返回: {"detail": "用户编号必须为9位数字"}
+```
+
+### 9.3 远端 MCP 服务测试
+
+#### 9.3.1 测试 tools/list（工具列表）
+
+```bash
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer prototype-token" \
+  -H "X-User-ID: 000000001" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}' | python3 -m json.tool
+```
+
+预期返回 4 个工具：
+- `get_my_info`
+- `get_my_department`
+- `get_my_balance`
+- `check_my_permission`
+
+#### 9.3.2 测试 tools/call（工具调用）
+
+```bash
+# 测试 get_my_info
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer prototype-token" \
+  -H "X-User-ID: 000000001" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "get_my_info", "arguments": {}}, "id": 2}' | python3 -m json.tool
+
+# 测试 get_my_balance（不同用户）
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer prototype-token" \
+  -H "X-User-ID: 000000002" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "get_my_balance", "arguments": {}}, "id": 3}' | python3 -m json.tool
+```
+
+#### 9.3.3 测试认证失败
+
+```bash
+# 测试错误 Token（应返回认证失败）
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer wrong-token" \
+  -H "X-User-ID: 000000001" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 4}'
+# 预期返回: {"error": "Token 无效"}
+
+# 测试格式错误的用户编号（应返回错误）
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer prototype-token" \
+  -H "X-User-ID: 123" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 5}'
+# 预期返回: {"error": "用户编号必须为9位数字"}
+```
+
+### 9.4 完整测试脚本
+
+创建测试脚本 `prototype/test_services.sh`：
+
+```bash
+#!/bin/bash
+
+echo "=========================================="
+echo "MCP 服务测试"
+echo "=========================================="
+
+# 颜色定义
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+pass_count=0
+fail_count=0
+
+# 测试函数
+test_api() {
+    local name="$1"
+    local url="$2"
+    local expected="$3"
+
+    response=$(curl -s "$url" 2>&1)
+    if echo "$response" | grep -q "$expected"; then
+        echo -e "${GREEN}[PASS]${NC} $name"
+        ((pass_count++))
+    else
+        echo -e "${RED}[FAIL]${NC} $name"
+        echo "  响应: $response"
+        ((fail_count++))
+    fi
+}
+
+test_mcp() {
+    local name="$1"
+    local token="$2"
+    local user_id="$3"
+    local method="$4"
+    local expected="$5"
+
+    response=$(curl -s -X POST http://localhost:8001/mcp \
+        -H "Authorization: Bearer $token" \
+        -H "X-User-ID: $user_id" \
+        -H "Content-Type: application/json" \
+        -d "{\"jsonrpc\": \"2.0\", \"method\": \"$method\", \"id\": 1}" 2>&1)
+
+    if echo "$response" | grep -q "$expected"; then
+        echo -e "${GREEN}[PASS]${NC} $name"
+        ((pass_count++))
+    else
+        echo -e "${RED}[FAIL]${NC} $name"
+        echo "  响应: $response"
+        ((fail_count++))
+    fi
+}
+
+echo ""
+echo "[后台 API 测试]"
+test_api "健康检查" "http://localhost:8000/health" "ok"
+test_api "用户查询 000000001" "http://localhost:8000/api/user/000000001" "张三"
+test_api "用户查询 000000002" "http://localhost:8000/api/user/000000002" "李四"
+test_api "不存在用户" "http://localhost:8000/api/user/999999999" "不存在"
+
+echo ""
+echo "[远端 MCP 服务测试]"
+test_api "健康检查" "http://localhost:8001/health" "ok"
+test_mcp "工具列表" "prototype-token" "000000001" "tools/list" "get_my_info"
+test_mcp "调用工具" "prototype-token" "000000001" "tools/call" "张三"
+test_mcp "错误Token" "wrong-token" "000000001" "tools/list" "Token 无效"
+
+echo ""
+echo "=========================================="
+echo "结果: ${pass_count} 通过, ${fail_count} 失败"
+echo "=========================================="
+
+if [ $fail_count -eq 0 ]; then
+    exit 0
+else
+    exit 1
+fi
+```
+
+### 9.5 开发经验总结
+
+#### 9.5.1 MCP SDK 使用注意事项
+
+**问题**: `FastMCP` 对象没有 `handle_request` 方法。
+
+**解决**: 使用 `list_tools()` 和 `call_tool()` 方法手动处理 JSON-RPC 请求：
+
+```python
+# 错误做法
+result = await mcp.handle_request(mcp_request)  # 方法不存在
+
+# 正确做法
+if method == "tools/list":
+    tools = await mcp.list_tools()
+    return {"jsonrpc": "2.0", "result": {"tools": tools}, "id": request_id}
+
+elif method == "tools/call":
+    result = await mcp.call_tool(tool_name, arguments)
+    return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": str(result)}]}, "id": request_id}
+```
+
+#### 9.5.2 JSON-RPC 2.0 响应格式
+
+MCP 使用 JSON-RPC 2.0 协议，响应格式必须包含：
+
+```json
+{
+    "jsonrpc": "2.0",
+    "result": { ... },
+    "id": <request_id>
+}
+```
+
+错误响应格式：
+
+```json
+{
+    "jsonrpc": "2.0",
+    "error": {"code": -32601, "message": "Method not found"},
+    "id": <request_id>
+}
+```
+
+#### 9.5.3 ContextVar 使用注意事项
+
+`ContextVar` 用于在每个请求中存储用户编号，确保异步环境下正确传递：
+
+```python
+# 定义上下文变量
+current_user_id: ContextVar[str] = ContextVar("current_user_id")
+
+# 在请求处理开始时设置
+current_user_id.set(user_id)
+
+# 在工具函数中获取
+user_id = current_user_id.get()
+```
+
+**注意**: `ContextVar` 必须在同一个异步上下文中使用，不能跨请求共享。
+
+#### 9.5.4 端口冲突处理
+
+如果服务启动失败，检查端口是否被占用：
+
+```bash
+# 查看端口占用
+lsof -i :8000  # 后台 API
+lsof -i :8001  # 远端 MCP 服务
+
+# 停止旧进程
+kill <PID>
+```
+
+### 9.6 测试结果示例
+
+```
+==========================================
+MCP 服务测试
+==========================================
+
+[后台 API 测试]
+[PASS] 健康检查
+[PASS] 用户查询 000000001
+[PASS] 用户查询 000000002
+[PASS] 不存在用户
+
+[远端 MCP 服务测试]
+[PASS] 健康检查
+[PASS] 工具列表
+[PASS] 调用工具
+[PASS] 错误Token
+
+==========================================
+结果: 8 通过, 0 失败
+==========================================
+```
+
+---
+
+## 10. 参考文档
+
+- [MCP 安全认证方案](mcp_security_authentication.md) - 完整的安全设计方案
+- [MCP 官方文档](https://modelcontextprotocol.io/) - MCP 协议规范
+- [Python MCP SDK](https://github.com/modelcontextprotocol/python-sdk) - SDK 使用指南
