@@ -577,6 +577,8 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
 
 ### 8.3 本地代理实现代码
 
+> **重要提示**：MCP SDK v1.27+ 中 `FastMCP` 没有 `hook` 方法。本地代理需要使用 `anyio` 直接处理 stdin/stdout 流实现 JSON-RPC 消息透传。
+
 ```python
 """
 本地 MCP 代理 (Sidecar)
@@ -585,50 +587,78 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
 1. 从环境变量或凭证文件获取用户身份
 2. 透传 MCP JSON-RPC 协议
 3. 在每个请求中自动注入认证 Header
+
+关键技术点：
+- 使用 anyio 处理 stdin/stdout 异步 I/O
+- JSON-RPC 消息透传，不依赖 FastMCP
+- 环境变量在启动时读取，运行时不可修改
 """
 
+import os
 import sys
 import json
+import logging
 import httpx
-from mcp.server.fastmcp import FastMCP
+import anyio
 
-# 创建代理（不定义任何工具）
-mcp = FastMCP("MCPProxy")
+from mcp.shared.message import SessionMessage
+import mcp.types as types
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr  # 日志输出到 stderr，不影响 stdio 通信
+)
+logger = logging.getLogger(__name__)
+
 
 def get_user_context() -> dict:
     """
     获取用户上下文
 
-    从凭证文件解密后获取员工编号和签名信息
+    从凭证文件解密后获取员工编号和签名信息。
+    环境变量在启动时一次性读取，运行时不可修改。
+
+    Returns:
+        包含 employee_id、signature、expires_at 的字典
     """
-    # 实际实现中从解密的凭证文件获取
     employee_id = os.environ.get("MCP_EMPLOYEE_ID")
     signature = os.environ.get("MCP_CREDENTIAL_SIGNATURE")
     expires_at = os.environ.get("MCP_CREDENTIAL_EXPIRES")
+    remote_url = os.environ.get("REMOTE_MCP_URL", "http://localhost:8001")
+
+    if not employee_id:
+        raise ValueError("未配置员工编号，请设置环境变量 MCP_EMPLOYEE_ID")
+    if not signature:
+        raise ValueError("未配置凭证签名，请设置环境变量 MCP_CREDENTIAL_SIGNATURE")
 
     return {
         "employee_id": employee_id,
         "signature": signature,
-        "expires_at": expires_at
+        "expires_at": expires_at,
+        "remote_url": remote_url
     }
 
-def forward_to_remote(mcp_request: dict) -> dict:
+
+async def forward_request(
+    request: types.JSONRPCMessage,
+    ctx: dict
+) -> types.JSONRPCMessage:
     """
     转发 MCP 请求到远端服务
 
     Args:
-        mcp_request: MCP JSON-RPC 请求
+        request: MCP JSON-RPC 请求
+        ctx: 用户上下文
 
     Returns:
         远端服务的响应
     """
-    ctx = get_user_context()
-    remote_url = os.environ.get("REMOTE_MCP_URL", "http://localhost:8001")
-
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            f"{remote_url}/mcp",
-            json=mcp_request,
+            f"{ctx['remote_url']}/mcp",
+            json=request.root.model_dump(by_alias=True, exclude_none=True),
             headers={
                 "X-Employee-ID": ctx["employee_id"],
                 "X-Credential-Signature": ctx["signature"],
@@ -636,14 +666,81 @@ def forward_to_remote(mcp_request: dict) -> dict:
                 "Content-Type": "application/json"
             }
         )
-        return response.json()
 
-# MCP 协议处理（拦截并转发）
-# 实际实现中需要处理 stdin/stdout 的 MCP 协议流
+        if response.status_code != 200:
+            logger.error(f"远端服务错误: status={response.status_code}")
+            error_response = {
+                "jsonrpc": "2.0",
+                "error": {"code": -32603, "message": f"远端服务错误: {response.status_code}"},
+                "id": request.root.id
+            }
+            return types.JSONRPCMessage.model_validate(error_response)
+
+        return types.JSONRPCMessage.model_validate(response.json())
+
+
+async def run_proxy():
+    """运行代理主循环"""
+    ctx = get_user_context()
+    logger.info(f"MCP 代理启动，目标: {ctx['remote_url']}")
+
+    # 使用 anyio 进行异步 I/O
+    async with anyio.create_task_group() as tg:
+        async with await anyio.open_file(sys.stdin.fileno(), "r") as stdin:
+            async with await anyio.open_file(sys.stdout.fileno(), "w") as stdout:
+                async for line in stdin:
+                    try:
+                        # 解析 JSON-RPC 消息
+                        message = types.JSONRPCMessage.model_validate_json(line)
+
+                        # 记录请求日志
+                        method = getattr(message.root, "method", "unknown")
+                        request_id = getattr(message.root, "id", "?")
+                        logger.info(f"转发 MCP 请求: method={method}, id={request_id}")
+
+                        # 转发请求
+                        response = await forward_request(message, ctx)
+
+                        # 发送响应
+                        json_str = response.root.model_dump_json(by_alias=True, exclude_none=True)
+                        await stdout.write(json_str + "\n")
+                        await stdout.flush()
+
+                    except httpx.ConnectError as e:
+                        logger.error(f"无法连接远端服务: {e}")
+                        error_response = {
+                            "jsonrpc": "2.0",
+                            "error": {"code": -32603, "message": "无法连接远端服务"},
+                            "id": None
+                        }
+                        await stdout.write(json.dumps(error_response) + "\n")
+                        await stdout.flush()
+
+                    except Exception as e:
+                        logger.error(f"处理请求失败: {e}")
+                        error_response = {
+                            "jsonrpc": "2.0",
+                            "error": {"code": -32603, "message": f"内部错误: {str(e)}"},
+                            "id": None
+                        }
+                        await stdout.write(json.dumps(error_response) + "\n")
+                        await stdout.flush()
+
+
+def main():
+    """主入口"""
+    try:
+        anyio.run(run_proxy)
+    except ValueError as e:
+        logger.error(f"配置错误: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"启动失败: {e}")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
-    # 使用 Stdio 协议运行代理
-    mcp.run(transport="stdio")
+    main()
 ```
 
 ### 8.4 Claude Code 配置
@@ -677,6 +774,7 @@ MCP 配置文件位置：
 **注意**：
 - `args` 中的路径必须使用**绝对路径**
 - 生产环境中的签名和过期时间从凭证文件解密获取
+- 本地代理依赖：`mcp>=1.0.0`, `httpx>=0.25.0`, `anyio>=3.0.0`
 
 ---
 
