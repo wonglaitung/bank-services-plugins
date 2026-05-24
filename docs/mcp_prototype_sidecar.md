@@ -553,30 +553,68 @@ async def check_my_permission() -> dict:
 async def handle_mcp_request(request: Request):
     """
     处理 MCP JSON-RPC 请求
-    
+
     1. 验证认证信息
     2. 注入用户上下文
-    3. 转发给 MCP 服务处理
+    3. 根据 method 调用对应的 MCP 方法
     """
     try:
         # 验证认证
         user_id = await verify_request(request)
-        
+
         # 注入用户上下文
         current_user_id.set(user_id)
-        
+
         # 获取 MCP 请求体
         mcp_request = await request.json()
-        
+        method = mcp_request.get("method", "")
+        request_id = mcp_request.get("id")
+
         # 记录审计日志
-        logger.info(f"MCP 请求: method={mcp_request.get('method')}, user={user_id}")
-        
-        # 转发给 MCP 服务处理
-        # 注意：这里需要根据 mcp SDK 的实际 API 进行适配
-        result = await mcp.handle_request(mcp_request)
-        
-        return result
-        
+        logger.info(f"MCP 请求: method={method}, user={user_id}")
+
+        # 根据 method 处理请求
+        if method == "tools/list":
+            # 返回工具列表
+            tools = await mcp.list_tools()
+            return {
+                "jsonrpc": "2.0",
+                "result": {"tools": tools},
+                "id": request_id
+            }
+
+        elif method == "tools/call":
+            # 调用工具
+            params = mcp_request.get("params", {})
+            tool_name = params.get("name")
+            arguments = params.get("arguments", {})
+
+            result = await mcp.call_tool(tool_name, arguments)
+            return {
+                "jsonrpc": "2.0",
+                "result": {"content": [{"type": "text", "text": str(result)}]},
+                "id": request_id
+            }
+
+        elif method == "initialize":
+            # 初始化响应
+            return {
+                "jsonrpc": "2.0",
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "FinanceService", "version": "1.0.0"}
+                },
+                "id": request_id
+            }
+
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32601, "message": f"Method not found: {method}"},
+                "id": request_id
+            }
+
     except HTTPException as e:
         return JSONResponse(
             status_code=e.status_code,
@@ -586,7 +624,7 @@ async def handle_mcp_request(request: Request):
         logger.error(f"处理 MCP 请求失败: {e}")
         return JSONResponse(
             status_code=500,
-            content={"error": "内部服务器错误"}
+            content={"error": f"内部服务器错误: {str(e)}"}
         )
 
 
@@ -1164,81 +1202,7 @@ else
 fi
 ```
 
-### 9.5 开发经验总结
-
-#### 9.5.1 MCP SDK 使用注意事项
-
-**问题**: `FastMCP` 对象没有 `handle_request` 方法。
-
-**解决**: 使用 `list_tools()` 和 `call_tool()` 方法手动处理 JSON-RPC 请求：
-
-```python
-# 错误做法
-result = await mcp.handle_request(mcp_request)  # 方法不存在
-
-# 正确做法
-if method == "tools/list":
-    tools = await mcp.list_tools()
-    return {"jsonrpc": "2.0", "result": {"tools": tools}, "id": request_id}
-
-elif method == "tools/call":
-    result = await mcp.call_tool(tool_name, arguments)
-    return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": str(result)}]}, "id": request_id}
-```
-
-#### 9.5.2 JSON-RPC 2.0 响应格式
-
-MCP 使用 JSON-RPC 2.0 协议，响应格式必须包含：
-
-```json
-{
-    "jsonrpc": "2.0",
-    "result": { ... },
-    "id": <request_id>
-}
-```
-
-错误响应格式：
-
-```json
-{
-    "jsonrpc": "2.0",
-    "error": {"code": -32601, "message": "Method not found"},
-    "id": <request_id>
-}
-```
-
-#### 9.5.3 ContextVar 使用注意事项
-
-`ContextVar` 用于在每个请求中存储用户编号，确保异步环境下正确传递：
-
-```python
-# 定义上下文变量
-current_user_id: ContextVar[str] = ContextVar("current_user_id")
-
-# 在请求处理开始时设置
-current_user_id.set(user_id)
-
-# 在工具函数中获取
-user_id = current_user_id.get()
-```
-
-**注意**: `ContextVar` 必须在同一个异步上下文中使用，不能跨请求共享。
-
-#### 9.5.4 端口冲突处理
-
-如果服务启动失败，检查端口是否被占用：
-
-```bash
-# 查看端口占用
-lsof -i :8000  # 后台 API
-lsof -i :8001  # 远端 MCP 服务
-
-# 停止旧进程
-kill <PID>
-```
-
-### 9.6 测试结果示例
+### 9.5 测试结果示例
 
 ```
 ==========================================
