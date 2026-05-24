@@ -1,0 +1,37 @@
+{
+  "000000001": {
+    "user_id": "000000001",
+    "name": "张三",
+    "department": "财务部",
+    "role": "viewer",
+    "balance": 125000.00
+  },
+  "000000002": {
+    "user_id": "000000002",
+    "name": "李四",
+    "department": "财务部",
+    "role": "admin",
+    "balance": 250000.00
+  },
+  "000000003": {
+    "user_id": "000000003",
+    "name": "王五",
+    "department": "技术部",
+    "role": "viewer",
+    "balance": 88000.00
+  },
+  "000000004": {
+    "user_id": "000000004",
+    "name": "赵六",
+    "department": "人事部",
+    "role": "viewer",
+    "balance": 150000.00
+  },
+  "000000005": {
+    "user_id": "000000005",
+    "name": "钱七",
+    "department": "技术部",
+    "role": "admin",
+    "balance": 320000.00
+  }
+}
