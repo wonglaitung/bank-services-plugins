@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "finance-proxy": {
+      "command": "python",
+      "args": ["/data/bank-services-plugins/prototype/local_proxy/main.py"],
+      "env": {
+        "REMOTE_MCP_URL": "http://localhost:8001",
+        "MCP_USER_ID": "000000001",
+        "MCP_AUTH_TOKEN": "prototype-token"
+      }
+    }
+  }
+}

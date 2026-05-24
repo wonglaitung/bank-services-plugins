@@ -854,16 +854,23 @@ httpx>=0.25.0
 
 ### 6.1 Claude Code 配置
 
-在 Claude Code 的 MCP 配置文件中添加：
+MCP 配置文件位置：
+
+| 位置 | 说明 | 优先级 |
+|------|------|--------|
+| 项目目录 `.mcp.json` | 项目级别配置，与团队共享 | 高 |
+| 用户目录 `~/.claude/mcp.json` | 用户级别配置，仅本机有效 | 中 |
+
+**推荐使用项目级配置**，在项目根目录创建 `.mcp.json` 文件：
 
 ```json
 {
   "mcpServers": {
     "finance-proxy": {
       "command": "python",
-      "args": ["/path/to/prototype/local_proxy/main.py"],
+      "args": ["/data/bank-services-plugins/prototype/local_proxy/main.py"],
       "env": {
-        "REMOTE_MCP_URL": "http://your-server:8001",
+        "REMOTE_MCP_URL": "http://localhost:8001",
         "MCP_USER_ID": "000000001",
         "MCP_AUTH_TOKEN": "prototype-token"
       }
@@ -872,7 +879,19 @@ httpx>=0.25.0
 }
 ```
 
-### 6.2 环境变量说明
+**注意**：
+- `args` 中的路径必须使用**绝对路径**
+- 生产环境将 `MCP_USER_ID` 和 `MCP_AUTH_TOKEN` 替换为实际值
+- 如果远端服务不在本机，将 `localhost` 改为实际服务器地址
+
+### 6.2 启用 MCP 服务
+
+配置完成后，重启 Claude Code，会提示是否启用 `finance-proxy` MCP 服务：
+
+1. 选择 **Yes** 启用服务
+2. Claude Code 会自动发现远端服务定义的所有工具
+
+### 6.3 环境变量说明
 
 | 变量名 | 说明 | 示例 | 必需 |
 |--------|------|------|------|
@@ -880,7 +899,7 @@ httpx>=0.25.0
 | `MCP_USER_ID` | 用户编号（9位数字） | `000000001` | ✅ |
 | `MCP_AUTH_TOKEN` | 认证令牌 | `prototype-token` | ✅ |
 
-### 6.3 远端服务配置
+### 6.4 远端服务配置
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
