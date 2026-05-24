@@ -1034,7 +1034,25 @@ python prototype/tools/generate_token.py --user-id 000000001 --expires 8
 
 ### 7.1 启动服务
 
+**方式一：使用启动脚本（推荐）**
+
 ```bash
+# 一键启动所有服务
+cd prototype
+./start_all.sh
+```
+
+启动脚本会自动：
+- 安装依赖
+- 读取密钥文件（`tools/.token_key`）
+- 启动后台 API 和远端 MCP 服务
+
+**方式二：手动启动**
+
+```bash
+# 0. 生成密钥（首次使用）
+python prototype/tools/generate_token.py --generate-key
+
 # 1. 启动后台 API (端口 8000)
 cd prototype/backend_api
 pip install -r requirements.txt
@@ -1043,7 +1061,9 @@ python main.py
 # 2. 启动远端 MCP 服务 (端口 8001)
 cd prototype/mcp_remote
 pip install -r requirements.txt
-python main.py
+
+# 读取密钥并启动
+TOKEN_KEY=$(base64 -w 0 ../tools/.token_key) TOKEN_KEY=$TOKEN_KEY python main.py
 
 # 3. 配置 Claude Code
 # 添加本地代理到 MCP 配置
