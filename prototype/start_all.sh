@@ -34,24 +34,56 @@ pip install -q -r "$SCRIPT_DIR/local_proxy/requirements.txt"
 echo ""
 echo "[2/3] 启动服务..."
 
-# 停止可能存在的旧进程
+# 停止可能存在的旧进程（通过 PID 文件）
 STOPPED_BACKEND=false
 STOPPED_REMOTE=false
 
-if pgrep -f "python.*backend_api/main.py" > /dev/null 2>&1; then
-    echo "  - 停止旧的后台 API 进程..."
-    OLD_BACKEND_PID=$(pgrep -f "python.*backend_api/main.py")
-    pkill -f "python.*backend_api/main.py" 2>/dev/null || true
-    echo "    已停止 PID: $OLD_BACKEND_PID"
-    STOPPED_BACKEND=true
+# 停止后台 API（通过 PID 文件或端口）
+BACKEND_PID_FILE="/tmp/backend_api.pid"
+if [ -f "$BACKEND_PID_FILE" ]; then
+    OLD_PID=$(cat "$BACKEND_PID_FILE")
+    if ps -p "$OLD_PID" > /dev/null 2>&1; then
+        echo "  - 停止旧的后台 API 进程..."
+        kill "$OLD_PID" 2>/dev/null || true
+        echo "    已停止 PID: $OLD_PID"
+        STOPPED_BACKEND=true
+    fi
+    rm -f "$BACKEND_PID_FILE"
 fi
 
-if pgrep -f "python.*mcp_remote/main.py" > /dev/null 2>&1; then
-    echo "  - 停止旧的远端 MCP 服务进程..."
-    OLD_REMOTE_PID=$(pgrep -f "python.*mcp_remote/main.py")
-    pkill -f "python.*mcp_remote/main.py" 2>/dev/null || true
-    echo "    已停止 PID: $OLD_REMOTE_PID"
-    STOPPED_REMOTE=true
+# 如果 PID 文件不存在，尝试通过端口查找
+if [ "$STOPPED_BACKEND" = false ]; then
+    PORT_PID=$(lsof -ti:8000 2>/dev/null || true)
+    if [ -n "$PORT_PID" ]; then
+        echo "  - 停止占用端口 8000 的进程..."
+        kill "$PORT_PID" 2>/dev/null || true
+        echo "    已停止 PID: $PORT_PID"
+        STOPPED_BACKEND=true
+    fi
+fi
+
+# 停止远端 MCP 服务（通过 PID 文件或端口）
+REMOTE_PID_FILE="/tmp/mcp_remote.pid"
+if [ -f "$REMOTE_PID_FILE" ]; then
+    OLD_PID=$(cat "$REMOTE_PID_FILE")
+    if ps -p "$OLD_PID" > /dev/null 2>&1; then
+        echo "  - 停止旧的远端 MCP 服务进程..."
+        kill "$OLD_PID" 2>/dev/null || true
+        echo "    已停止 PID: $OLD_PID"
+        STOPPED_REMOTE=true
+    fi
+    rm -f "$REMOTE_PID_FILE"
+fi
+
+# 如果 PID 文件不存在，尝试通过端口查找
+if [ "$STOPPED_REMOTE" = false ]; then
+    PORT_PID=$(lsof -ti:8001 2>/dev/null || true)
+    if [ -n "$PORT_PID" ]; then
+        echo "  - 停止占用端口 8001 的进程..."
+        kill "$PORT_PID" 2>/dev/null || true
+        echo "    已停止 PID: $PORT_PID"
+        STOPPED_REMOTE=true
+    fi
 fi
 
 if [ "$STOPPED_BACKEND" = true ] || [ "$STOPPED_REMOTE" = true ]; then
