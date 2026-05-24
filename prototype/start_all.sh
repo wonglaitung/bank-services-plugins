@@ -35,10 +35,28 @@ echo ""
 echo "[2/3] 启动服务..."
 
 # 停止可能存在的旧进程
-pkill -f "python.*backend_api/main.py" 2>/dev/null || true
-pkill -f "python.*mcp_remote/main.py" 2>/dev/null || true
+STOPPED_BACKEND=false
+STOPPED_REMOTE=false
 
-sleep 1
+if pgrep -f "python.*backend_api/main.py" > /dev/null 2>&1; then
+    echo "  - 停止旧的后台 API 进程..."
+    OLD_BACKEND_PID=$(pgrep -f "python.*backend_api/main.py")
+    pkill -f "python.*backend_api/main.py" 2>/dev/null || true
+    echo "    已停止 PID: $OLD_BACKEND_PID"
+    STOPPED_BACKEND=true
+fi
+
+if pgrep -f "python.*mcp_remote/main.py" > /dev/null 2>&1; then
+    echo "  - 停止旧的远端 MCP 服务进程..."
+    OLD_REMOTE_PID=$(pgrep -f "python.*mcp_remote/main.py")
+    pkill -f "python.*mcp_remote/main.py" 2>/dev/null || true
+    echo "    已停止 PID: $OLD_REMOTE_PID"
+    STOPPED_REMOTE=true
+fi
+
+if [ "$STOPPED_BACKEND" = true ] || [ "$STOPPED_REMOTE" = true ]; then
+    sleep 2
+fi
 
 # 启动后台 API
 echo "  - 启动后台 API (端口 8000)..."
