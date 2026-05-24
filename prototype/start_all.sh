@@ -97,11 +97,13 @@ echo '      "command": "python",'
 echo '      "args": ["'"$SCRIPT_DIR"'/local_proxy/main.py"],'
 echo '      "env": {'
 echo '        "REMOTE_MCP_URL": "http://localhost:8001",'
-echo '        "MCP_USER_ID": "000000001",'
-echo '        "MCP_AUTH_TOKEN": "prototype-token"'
+echo '        "MCP_AUTH_TOKEN": "<使用 tools/generate_token.py 生成>"'
 echo '      }'
 echo '    }'
 echo '  }'
 echo '}'
+echo ""
+echo "生成 Token 命令:"
+echo "  python $SCRIPT_DIR/tools/generate_token.py --user-id 000000001 --expires 8"
 echo ""
 echo "=========================================="

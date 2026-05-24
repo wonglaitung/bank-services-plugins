@@ -1014,9 +1014,19 @@ MCP 配置文件位置：
 # 生成密钥（首次使用）
 python prototype/tools/generate_token.py --generate-key
 
-# 生成 Token
+# 生成 Token（有效期单位：小时）
 python prototype/tools/generate_token.py --user-id 000000001 --expires 8
+# --expires 8 表示 Token 有效期为 8 小时
 ```
+
+**参数说明**：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--generate-key` | 生成新的 AES-256 密钥 | - |
+| `--show-key` | 显示当前密钥（Base64） | - |
+| `--user-id` | 用户编号（9位数字） | 必需 |
+| `--expires` | Token 有效期（**小时**） | 8 |
 
 ---
 
@@ -1073,7 +1083,9 @@ Claude Code 会调用 `get_my_info()` 工具，返回：
 
 ### 7.4 密钥管理
 
-**密钥文件位置**：`prototype/tools/.token_key`
+#### 7.4.1 密钥文件位置
+
+密钥存储在：`prototype/tools/.token_key`
 
 ```bash
 # 查看密钥
@@ -1081,28 +1093,107 @@ python prototype/tools/generate_token.py --show-key
 # 输出: TOKEN_KEY=6Hd+908eMNP0T/4CmFKxdpkHI3HaMrINtej6VCcpx7Y=
 ```
 
-**加解密流程**：
+#### 7.4.2 密钥生成流程
 
-| 步骤 | 本地代理 | 远端服务 |
-|------|----------|----------|
-| 1 | 读取 `MCP_AUTH_TOKEN` 环境变量 | 提取 Authorization Header |
-| 2 | 直接转发 Token（不解密） | Base64 解码 |
-| 3 | - | 解析 nonce (12 bytes) + ciphertext |
-| 4 | - | 使用 `TOKEN_KEY` AES-GCM 解密 |
-| 5 | - | 解析 JSON 获取 `user_id`, `expires_at` |
-| 6 | - | 验证有效期 |
+首次使用时，需要生成密钥：
 
-**密钥配置**：
+```bash
+# 步骤 1: 生成密钥
+python prototype/tools/generate_token.py --generate-key
+# 输出: 密钥已保存到 .token_key
 
-| 环境 | 配置方式 |
-|------|----------|
-| 本地代理 | 不需要密钥，只转发 Token |
-| 远端服务 | 设置 `TOKEN_KEY` 环境变量（Base64 编码） |
+# 步骤 2: 查看生成的密钥
+python prototype/tools/generate_token.py --show-key
+# 输出: TOKEN_KEY=xxx（Base64 编码的 32 字节密钥）
+
+# 步骤 3: 使用密钥生成 Token
+python prototype/tools/generate_token.py --user-id 000000001 --expires 8
+# 输出: MCP_AUTH_TOKEN=xxx（加密后的 Token）
+```
+
+#### 7.4.3 Token 生成完整流程
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Token 生成流程                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. 读取密钥文件 .token_key                                      │
+│     └── 若不存在，使用 --generate-key 生成                       │
+│                                                                 │
+│  2. 构造 Token 数据                                              │
+│     {                                                           │
+│       "user_id": "000000001",                                   │
+│       "expires_at": "2026-05-25T18:00:00Z",  // 当前时间 + N小时 │
+│       "issued_at": "2026-05-25T10:00:00Z"    // 当前时间         │
+│     }                                                           │
+│                                                                 │
+│  3. AES-256-GCM 加密                                            │
+│     ├── 生成随机 nonce (12 bytes)                               │
+│     ├── 使用密钥加密 JSON → ciphertext + tag                    │
+│     └── 组装: nonce + ciphertext + tag                          │
+│                                                                 │
+│  4. Base64 编码                                                  │
+│     └── 输出: MCP_AUTH_TOKEN=xxx                                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 7.4.4 Token 解密流程（远端服务）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Token 解密流程                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. 提取 Authorization Header                                   │
+│     └── token = header.replace("Bearer ", "")                  │
+│                                                                 │
+│  2. Base64 解码                                                  │
+│     └── encrypted = base64.b64decode(token)                     │
+│                                                                 │
+│  3. 解析 nonce 和 ciphertext                                     │
+│     ├── nonce = encrypted[:12]                                  │
+│     └── ciphertext_with_tag = encrypted[12:]                    │
+│                                                                 │
+│  4. AES-256-GCM 解密                                             │
+│     ├── 使用 TOKEN_KEY 解密                                      │
+│     └── plaintext = AESGCM.decrypt(nonce, ciphertext, None)     │
+│                                                                 │
+│  5. 解析 JSON                                                    │
+│     └── token_data = json.loads(plaintext)                      │
+│                                                                 │
+│  6. 验证有效期                                                   │
+│     ├── expires_at = token_data["expires_at"]                   │
+│     └── if now > expires_at: raise "Token 已过期"               │
+│                                                                 │
+│  7. 返回用户身份                                                  │
+│     └── user_id = token_data["user_id"]                         │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 7.4.5 密钥配置对照表
+
+| 组件 | 是否需要密钥 | 配置方式 |
+|------|--------------|----------|
+| `generate_token.py` | ✅ 需要 | 自动读取 `.token_key` 文件 |
+| 本地代理 | ❌ 不需要 | 只转发 Token，不解密 |
+| 远端服务 | ✅ 需要 | 设置 `TOKEN_KEY` 环境变量 |
 
 ```bash
 # 启动远端服务时设置密钥
 TOKEN_KEY=6Hd+908eMNP0T/4CmFKxdpkHI3HaMrINtej6VCcpx7Y= python prototype/mcp_remote/main.py
 ```
+
+#### 7.4.6 密钥安全注意事项
+
+| 注意事项 | 说明 |
+|----------|------|
+| **密钥文件权限** | `.token_key` 应设置为 600（仅所有者可读写） |
+| **密钥不要提交** | 添加到 `.gitignore`，避免泄露 |
+| **生产环境** | 从安全配置中心或环境变量读取，不使用文件 |
+| **密钥轮换** | 定期更换密钥，重新生成所有 Token |
 
 ### 7.4 验证添加工具无需修改代理
 
