@@ -1,14 +1,15 @@
 """
 MCP 协议透传代理
 
-本地代理作为 MCP JSON-RPC 协议的透明转发层：
+本地代理作为 MCP Server 实现：
 - 接收 Claude Code 的 MCP 请求 (Stdio)
+- 使用 Server 实例处理 MCP 协议握手
 - 在每个请求中自动注入加密 Token
 - 通过 HTTPS 转发到远端 MCP 服务
 - 返回远端服务的响应
 
 关键特性：
-- Tools 定义在远端服务，本地代理不定义任何工具
+- Tools 定义在远端服务，本地代理通过 HTTP 获取
 - 用户身份封装在加密 Token 中，本地代理无法查看
 - Token 从环境变量读取，模型无法修改
 
@@ -24,8 +25,9 @@ import json
 import logging
 import httpx
 
-import mcp.types as types
+from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
 
 # 配置日志
 logging.basicConfig(
@@ -36,11 +38,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_user_context() -> dict:
+def get_config() -> dict:
     """
-    获取用户上下文
-
-    只读取 Token，不解密。用户身份由远端服务解密获取。
+    获取配置
 
     Returns:
         包含 token 和 remote_url 的字典
@@ -60,111 +60,178 @@ def get_user_context() -> dict:
     }
 
 
-async def forward_request(
-    request: types.JSONRPCMessage,
-    ctx: dict
-) -> types.JSONRPCMessage | None:
+# ==================== 远端通信 ====================
+
+async def fetch_tools_from_remote(ctx: dict) -> list[Tool]:
     """
-    转发 MCP 请求到远端服务
+    从远端获取工具列表并转换为 Tool 对象
 
     Args:
-        request: MCP JSON-RPC 请求
-        ctx: 用户上下文
+        ctx: 配置上下文
 
     Returns:
-        远端服务的响应，notification 返回 None
+        Tool 对象列表
     """
-    # 获取请求数据
-    request_data = request.root.model_dump(by_alias=True, exclude_none=True)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{ctx['remote_url']}/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                },
+                headers={
+                    "Authorization": f"Bearer {ctx['token']}",
+                    "Content-Type": "application/json"
+                }
+            )
 
-    # notification 类型消息（没有 id）不需要响应
-    if "id" not in request_data or request_data["id"] is None:
-        # 但仍需转发到远端
-        method = request_data.get("method", "unknown")
-        logger.info(f"转发 MCP notification: method={method}")
+            if response.status_code != 200:
+                logger.error(f"获取工具列表失败: HTTP {response.status_code}")
+                return []
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{ctx['remote_url']}/mcp",
-            json=request_data,
-            headers={
-                "Authorization": f"Bearer {ctx['token']}",
-                "Content-Type": "application/json"
-            }
-        )
+            data = response.json()
+            if "error" in data:
+                logger.error(f"远端返回错误: {data['error']}")
+                return []
 
-        if response.status_code != 200:
-            logger.error(f"远端服务错误: status={response.status_code}")
-            error_response = {
-                "jsonrpc": "2.0",
-                "error": {"code": -32603, "message": f"远端服务错误: {response.status_code}"},
-                "id": request_data.get("id")
-            }
-            return types.JSONRPCMessage.model_validate(error_response)
+            tools_data = data.get("result", {}).get("tools", [])
+            logger.info(f"从远端获取 {len(tools_data)} 个工具")
 
-        response_data = response.json()
+            # 转换为 Tool 对象
+            tools = []
+            for t in tools_data:
+                try:
+                    # 移除多余的字段，只保留 Tool 需要的字段
+                    tool_dict = {
+                        "name": t.get("name"),
+                        "description": t.get("description"),
+                        "inputSchema": t.get("inputSchema", {"type": "object", "properties": {}})
+                    }
+                    tools.append(Tool(**tool_dict))
+                except Exception as e:
+                    logger.warning(f"转换工具失败: {t.get('name')}, {e}")
 
-        # notification 不需要响应
-        if "id" not in request_data or request_data["id"] is None:
-            return None
+            return tools
 
-        return types.JSONRPCMessage.model_validate(response_data)
+    except Exception as e:
+        logger.error(f"获取工具列表异常: {e}")
+        return []
 
 
-async def run_proxy():
-    """运行代理主循环"""
+async def call_tool_on_remote(name: str, arguments: dict, ctx: dict) -> str:
+    """
+    在远端调用工具
+
+    Args:
+        name: 工具名称
+        arguments: 工具参数
+        ctx: 配置上下文
+
+    Returns:
+        工具执行结果（字符串）
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{ctx['remote_url']}/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": name,
+                        "arguments": arguments
+                    }
+                },
+                headers={
+                    "Authorization": f"Bearer {ctx['token']}",
+                    "Content-Type": "application/json"
+                }
+            )
+
+            if response.status_code != 200:
+                return f"远端服务错误: HTTP {response.status_code}"
+
+            data = response.json()
+
+            if "error" in data:
+                error_msg = data["error"].get("message", "未知错误")
+                return f"工具执行失败: {error_msg}"
+
+            # 提取结果
+            result = data.get("result", {})
+            content = result.get("content", [])
+            if content and isinstance(content, list) and len(content) > 0:
+                # content 可能是字符串形式的 TextContent 对象
+                text_content = content[0]
+                if isinstance(text_content, dict):
+                    return text_content.get("text", str(result))
+                elif isinstance(text_content, str):
+                    # 处理字符串形式的 TextContent
+                    return text_content
+                else:
+                    return str(text_content)
+
+            return str(result)
+
+    except httpx.ConnectError as e:
+        logger.error(f"无法连接远端服务: {e}")
+        return "无法连接远端服务"
+    except Exception as e:
+        logger.error(f"调用工具异常: {e}")
+        return f"调用失败: {str(e)}"
+
+
+# ==================== MCP 服务器实现 ====================
+
+async def run_server():
+    """运行 MCP 服务器"""
     # 获取配置
-    ctx = get_user_context()
+    ctx = get_config()
 
     logger.info(f"MCP 代理启动，目标: {ctx['remote_url']}")
 
-    # 使用 MCP SDK 的 stdio_server
+    # 预加载工具列表
+    remote_tools = await fetch_tools_from_remote(ctx)
+    logger.info(f"已加载 {len(remote_tools)} 个工具")
+
+    # 创建 MCP Server 实例
+    server = Server("finance-proxy")
+
+    # 注册 list_tools 处理器
+    @server.list_tools()
+    async def list_tools():
+        """返回远端工具列表"""
+        # 每次调用时重新获取工具列表（支持动态更新）
+        tools = await fetch_tools_from_remote(ctx)
+        return tools
+
+    # 注册 call_tool 处理器
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict):
+        """代理工具调用"""
+        logger.info(f"调用工具: {name}, 参数: {arguments}")
+        result = await call_tool_on_remote(name, arguments, ctx)
+        return [TextContent(type="text", text=result)]
+
+    # 使用 stdio_server 创建传输层
     async with stdio_server() as (read_stream, write_stream):
-        async for session_message in read_stream:
-            try:
-                message = session_message.message
+        logger.info("MCP 服务器已启动，等待连接...")
 
-                # 记录请求日志
-                request_data = message.root.model_dump(by_alias=True, exclude_none=True)
-                method = request_data.get("method", "unknown")
-                msg_id = request_data.get("id")
-                logger.info(f"转发 MCP 请求: method={method}, id={msg_id}")
+        # 获取初始化选项
+        init_options = server.create_initialization_options()
 
-                # 转发请求
-                response = await forward_request(message, ctx)
-
-                # notification 不需要发送响应
-                if response is None:
-                    continue
-
-                # 发送响应
-                from mcp.shared.message import SessionMessage
-                await write_stream.send(SessionMessage(response))
-
-            except httpx.ConnectError as e:
-                logger.error(f"无法连接远端服务: {e}")
-                error_response = {
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32603, "message": "无法连接远端服务"},
-                    "id": None
-                }
-                await write_stream.send(SessionMessage(types.JSONRPCMessage.model_validate(error_response)))
-
-            except Exception as e:
-                logger.error(f"处理请求失败: {e}")
-                error_response = {
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32603, "message": f"内部错误: {str(e)}"},
-                    "id": None
-                }
-                await write_stream.send(SessionMessage(types.JSONRPCMessage.model_validate(error_response)))
+        # 运行服务器
+        await server.run(read_stream, write_stream, init_options)
 
 
 def main():
     """主入口"""
     import anyio
     try:
-        anyio.run(run_proxy)
+        anyio.run(run_server)
     except ValueError as e:
         logger.error(f"配置错误: {e}")
         sys.exit(1)
