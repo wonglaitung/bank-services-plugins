@@ -559,34 +559,41 @@ def decrypt_and_verify(encrypted_data: bytes, password: str, public_key) -> dict
 ```
 Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 MCP 服务
     │                        │                      │
-    │    MCP 协议 (JSON-RPC)  │     HTTP + Header    │
+    │    MCP 协议 (JSON-RPC)  │     HTTP + Token    │
     │                        │                      │
     │  tools/list ──────────────────────────────────▶ 定义在远端
     │  tools/call ──────────────────────────────────▶ 执行在远端
     │                        │                      │
     │                        │  自动注入:           │
-    │                        │  • X-Employee-ID     │
-    │                        │  • X-Credential-Sig  │
-    │                        │  • X-Credential-Exp  │
+    │                        │  • Authorization     │
+    │                        │    (Bearer Token)    │
 ```
 
 **关键点**：
-- 本地代理不定义任何工具，所有工具定义在远端服务
+- 本地代理使用 `mcp.server.Server` 类实现真正的 MCP 服务器
+- 所有工具定义在远端服务，本地代理动态获取并注册
 - Claude Code 通过本地代理自动发现远端工具
-- 用户编号和签名在本地代理注入，模型无法修改
+- 用户身份封装在加密 Token 中，本地代理无法查看或修改
 
 ### 8.3 本地代理实现代码
 
-> **重要提示**：本地代理只传递加密 Token，不读取用户身份。用户身份由远端服务从 Token 解密获取。
+> **重要提示**：本地代理使用 `mcp.server.Server` 类实现真正的 MCP 服务器，通过 stdio 与 Claude Code 通信，动态获取远端工具列表。
 
 ```python
 """
-本地 MCP 代理 (Sidecar)
+MCP 协议透传代理
 
-职责：
-1. 从环境变量读取加密 Token
-2. 透传 MCP JSON-RPC 协议
-3. 在每个请求中自动注入 Token
+本地代理作为 MCP Server 实现：
+- 接收 Claude Code 的 MCP 请求 (Stdio)
+- 使用 Server 实例处理 MCP 协议握手
+- 在每个请求中自动注入加密 Token
+- 通过 HTTPS 转发到远端 MCP 服务
+- 返回远端服务的响应
+
+关键特性：
+- Tools 定义在远端服务，本地代理通过 HTTP 获取
+- 用户身份封装在加密 Token 中，本地代理无法查看
+- Token 从环境变量读取，模型无法修改
 
 安全设计：
 - 本地代理只知道 Token，不知道用户身份
@@ -599,10 +606,10 @@ import sys
 import json
 import logging
 import httpx
-import anyio
 
-from mcp.shared.message import SessionMessage
-import mcp.types as types
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
 
 # 配置日志
 logging.basicConfig(
@@ -613,11 +620,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_user_context() -> dict:
+def get_config() -> dict:
     """
-    获取用户上下文
-
-    只读取 Token，不解密。用户身份由远端服务解密获取。
+    获取配置
 
     Returns:
         包含 token 和 remote_url 的字典
@@ -637,94 +642,174 @@ def get_user_context() -> dict:
     }
 
 
-async def forward_request(
-    request: types.JSONRPCMessage,
-    ctx: dict
-) -> types.JSONRPCMessage:
+# ==================== 远端通信 ====================
+
+async def fetch_tools_from_remote(ctx: dict) -> list[Tool]:
     """
-    转发 MCP 请求到远端服务
+    从远端获取工具列表并转换为 Tool 对象
 
     Args:
-        request: MCP JSON-RPC 请求
-        ctx: 用户上下文
+        ctx: 配置上下文
 
     Returns:
-        远端服务的响应
+        Tool 对象列表
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{ctx['remote_url']}/mcp",
-            json=request.root.model_dump(by_alias=True, exclude_none=True),
-            headers={
-                "Authorization": f"Bearer {ctx['token']}",
-                "Content-Type": "application/json"
-            }
-        )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{ctx['remote_url']}/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                },
+                headers={
+                    "Authorization": f"Bearer {ctx['token']}",
+                    "Content-Type": "application/json"
+                }
+            )
 
-        if response.status_code != 200:
-            logger.error(f"远端服务错误: status={response.status_code}")
-            error_response = {
-                "jsonrpc": "2.0",
-                "error": {"code": -32603, "message": f"远端服务错误: {response.status_code}"},
-                "id": request.root.id
-            }
-            return types.JSONRPCMessage.model_validate(error_response)
+            if response.status_code != 200:
+                logger.error(f"获取工具列表失败: HTTP {response.status_code}")
+                return []
 
-        return types.JSONRPCMessage.model_validate(response.json())
+            data = response.json()
+            if "error" in data:
+                logger.error(f"远端返回错误: {data['error']}")
+                return []
+
+            tools_data = data.get("result", {}).get("tools", [])
+            logger.info(f"从远端获取 {len(tools_data)} 个工具")
+
+            # 转换为 Tool 对象
+            tools = []
+            for t in tools_data:
+                try:
+                    tool_dict = {
+                        "name": t.get("name"),
+                        "description": t.get("description"),
+                        "inputSchema": t.get("inputSchema", {"type": "object", "properties": {}})
+                    }
+                    tools.append(Tool(**tool_dict))
+                except Exception as e:
+                    logger.warning(f"转换工具失败: {t.get('name')}, {e}")
+
+            return tools
+
+    except Exception as e:
+        logger.error(f"获取工具列表异常: {e}")
+        return []
 
 
-async def run_proxy():
-    """运行代理主循环"""
-    ctx = get_user_context()
+async def call_tool_on_remote(name: str, arguments: dict, ctx: dict) -> str:
+    """
+    在远端调用工具
+
+    Args:
+        name: 工具名称
+        arguments: 工具参数
+        ctx: 配置上下文
+
+    Returns:
+        工具执行结果（字符串）
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{ctx['remote_url']}/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": name,
+                        "arguments": arguments
+                    }
+                },
+                headers={
+                    "Authorization": f"Bearer {ctx['token']}",
+                    "Content-Type": "application/json"
+                }
+            )
+
+            if response.status_code != 200:
+                return f"远端服务错误: HTTP {response.status_code}"
+
+            data = response.json()
+
+            if "error" in data:
+                error_msg = data["error"].get("message", "未知错误")
+                return f"工具执行失败: {error_msg}"
+
+            # 提取结果
+            result = data.get("result", {})
+            content = result.get("content", [])
+            if content and isinstance(content, list) and len(content) > 0:
+                text_content = content[0]
+                if isinstance(text_content, dict):
+                    return text_content.get("text", str(result))
+                elif isinstance(text_content, str):
+                    return text_content
+                else:
+                    return str(text_content)
+
+            return str(result)
+
+    except httpx.ConnectError as e:
+        logger.error(f"无法连接远端服务: {e}")
+        return "无法连接远端服务"
+    except Exception as e:
+        logger.error(f"调用工具异常: {e}")
+        return f"调用失败: {str(e)}"
+
+
+# ==================== MCP 服务器实现 ====================
+
+async def run_server():
+    """运行 MCP 服务器"""
+    # 获取配置
+    ctx = get_config()
+
     logger.info(f"MCP 代理启动，目标: {ctx['remote_url']}")
 
-    # 使用 anyio 进行异步 I/O
-    async with anyio.create_task_group() as tg:
-        async with await anyio.open_file(sys.stdin.fileno(), "r") as stdin:
-            async with await anyio.open_file(sys.stdout.fileno(), "w") as stdout:
-                async for line in stdin:
-                    try:
-                        # 解析 JSON-RPC 消息
-                        message = types.JSONRPCMessage.model_validate_json(line)
+    # 预加载工具列表
+    remote_tools = await fetch_tools_from_remote(ctx)
+    logger.info(f"已加载 {len(remote_tools)} 个工具")
 
-                        # 记录请求日志
-                        method = getattr(message.root, "method", "unknown")
-                        request_id = getattr(message.root, "id", "?")
-                        logger.info(f"转发 MCP 请求: method={method}, id={request_id}")
+    # 创建 MCP Server 实例
+    server = Server("finance-proxy")
 
-                        # 转发请求
-                        response = await forward_request(message, ctx)
+    # 注册 list_tools 处理器
+    @server.list_tools()
+    async def list_tools():
+        """返回远端工具列表"""
+        tools = await fetch_tools_from_remote(ctx)
+        return tools
 
-                        # 发送响应
-                        json_str = response.root.model_dump_json(by_alias=True, exclude_none=True)
-                        await stdout.write(json_str + "\n")
-                        await stdout.flush()
+    # 注册 call_tool 处理器
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict):
+        """代理工具调用"""
+        logger.info(f"调用工具: {name}, 参数: {arguments}")
+        result = await call_tool_on_remote(name, arguments, ctx)
+        return [TextContent(type="text", text=result)]
 
-                    except httpx.ConnectError as e:
-                        logger.error(f"无法连接远端服务: {e}")
-                        error_response = {
-                            "jsonrpc": "2.0",
-                            "error": {"code": -32603, "message": "无法连接远端服务"},
-                            "id": None
-                        }
-                        await stdout.write(json.dumps(error_response) + "\n")
-                        await stdout.flush()
+    # 使用 stdio_server 创建传输层
+    async with stdio_server() as (read_stream, write_stream):
+        logger.info("MCP 服务器已启动，等待连接...")
 
-                    except Exception as e:
-                        logger.error(f"处理请求失败: {e}")
-                        error_response = {
-                            "jsonrpc": "2.0",
-                            "error": {"code": -32603, "message": f"内部错误: {str(e)}"},
-                            "id": None
-                        }
-                        await stdout.write(json.dumps(error_response) + "\n")
-                        await stdout.flush()
+        # 获取初始化选项
+        init_options = server.create_initialization_options()
+
+        # 运行服务器
+        await server.run(read_stream, write_stream, init_options)
 
 
 def main():
     """主入口"""
+    import anyio
     try:
-        anyio.run(run_proxy)
+        anyio.run(run_server)
     except ValueError as e:
         logger.error(f"配置错误: {e}")
         sys.exit(1)
@@ -736,6 +821,16 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
+**关键设计点**（原型验证）：
+
+| 设计 | 说明 |
+|------|------|
+| **Server 实例** | 使用 `mcp.server.Server` 创建真正的 MCP 服务器 |
+| **list_tools 处理器** | 从远端获取工具列表并转换为 `Tool` 对象 |
+| **call_tool 处理器** | 转发工具调用到远端，返回 `TextContent` 结果 |
+| **initialization_options** | 使用 `server.create_initialization_options()` 获取默认初始化选项 |
+| **工具自动注册** | Claude Code 通过 MCP 协议自动发现并注册工具 |
 
 ### 8.4 Claude Code 配置
 
@@ -773,100 +868,211 @@ MCP 配置文件位置：
 
 ## 9. 身份传递与验证
 
-### 9.1 客户端请求头
+> **原型验证说明**：原型验证了使用加密 Token 的认证方式，用户身份封装在 Token 中，本地代理无法查看。以下是基于原型验证的设计。
+
+### 9.1 客户端请求格式
+
+原型验证了使用单一 Bearer Token 的认证方式：
 
 ```
-POST /sse HTTP/1.1
+POST /mcp HTTP/1.1
 Host: mcp-server.example.com
 Content-Type: application/json
-X-Employee-ID: EMP00123
-X-Credential-Signature: YWJjZGVmZ2hpamtsbW5vcA==
-X-Credential-Expires: 2026-05-24T18:00:00Z
+Authorization: Bearer <加密Token>
 ```
 
-| Header | 说明 | 示例 |
-|--------|------|------|
-| X-Employee-ID | 员工编号 | EMP00123 |
-| X-Credential-Signature | RSA 签名 (Base64) | YWJjZGVm... |
-| X-Credential-Expires | 凭证过期时间 (ISO 8601) | 2026-05-24T18:00:00Z |
+**Token 内容（加密后）**：
+```json
+{
+  "user_id": "000000001",
+  "expires_at": "2026-05-25T18:00:00Z",
+  "issued_at": "2026-05-25T10:00:00Z"
+}
+```
 
-### 9.2 服务端验证逻辑
+| 字段 | 说明 | 示例 |
+|------|------|------|
+| user_id | 用户编号（9位数字） | 000000001 |
+| expires_at | Token 过期时间 (ISO 8601) | 2026-05-25T18:00:00Z |
+| issued_at | Token 签发时间 | 2026-05-25T10:00:00Z |
+
+### 9.2 Token 加密与解密
+
+#### 9.2.1 Token 生成（认证系统）
 
 ```python
-from fastapi import Request, HTTPException
-from datetime import datetime, timezone
+import os
+import json
+import base64
+from datetime import datetime, timezone, timedelta
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-async def verify_employee_headers(request: Request) -> str:
+def generate_token(user_id: str, expires_hours: int, key: bytes) -> str:
     """
-    从 HTTP Header 验证员工身份
+    生成加密 Token
+
+    Args:
+        user_id: 用户编号（9位数字）
+        expires_hours: 有效期（小时）
+        key: AES-256 密钥（32 bytes）
 
     Returns:
-        验证通过的员工编号
+        Base64 编码的加密 Token
+    """
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=expires_hours)
+
+    token_data = {
+        "user_id": user_id,
+        "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    }
+
+    # AES-GCM 加密
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)
+    plaintext = json.dumps(token_data).encode('utf-8')
+    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+
+    # 组装并 Base64 编码
+    encrypted = nonce + ciphertext
+    return base64.b64encode(encrypted).decode('utf-8')
+```
+
+#### 9.2.2 Token 解密与验证（远端服务）
+
+```python
+import base64
+import json
+from datetime import datetime, timezone
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from fastapi import Request, HTTPException
+
+def decrypt_token(token_b64: str, key: bytes) -> dict:
+    """
+    解密 Token 获取用户身份
+
+    Args:
+        token_b64: Base64 编码的加密 Token
+        key: AES-256 密钥（32 bytes）
+
+    Returns:
+        包含 user_id, expires_at 的字典
 
     Raises:
-        HTTPException: 验证失败
+        ValueError: Token 无效或过期
     """
-    employee_id = request.headers.get("X-Employee-ID")
-    signature_b64 = request.headers.get("X-Credential-Signature")
-    expires_at_str = request.headers.get("X-Credential-Expires")
-
-    # 1. 检查必要 Header
-    if not all([employee_id, signature_b64, expires_at_str]):
-        raise HTTPException(401, "缺少认证信息")
-
-    # 2. 检查有效期
     try:
+        # 1. Base64 解码
+        encrypted = base64.b64decode(token_b64)
+
+        # 2. 解析 nonce 和 ciphertext
+        if len(encrypted) < 12:
+            raise ValueError("Token 格式错误")
+        nonce = encrypted[:12]
+        ciphertext_with_tag = encrypted[12:]
+
+        # 3. AES-GCM 解密
+        aesgcm = AESGCM(key)
+        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
+
+        # 4. 解析 JSON
+        token_data = json.loads(plaintext.decode('utf-8'))
+
+        # 5. 验证必要字段
+        if 'user_id' not in token_data or 'expires_at' not in token_data:
+            raise ValueError("Token 缺少必要字段")
+
+        # 6. 验证有效期
+        expires_at_str = token_data['expires_at']
         expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
         if datetime.now(timezone.utc) > expires_at:
-            raise HTTPException(401, "凭证已过期")
+            raise ValueError("Token 已过期")
+
+        return token_data
+
     except ValueError:
-        raise HTTPException(400, "无效的过期时间格式")
+        raise
+    except Exception as e:
+        raise ValueError(f"Token 解密失败: {str(e)}")
 
-    # 3. 验证签名
-    sign_content = f"{employee_id}:{expires_at_str}"
+
+async def verify_request(request: Request, token_key: bytes) -> str:
+    """
+    验证请求并返回用户编号
+
+    Returns:
+        验证通过的用户编号
+
+    Raises:
+        HTTPException: 认证失败
+    """
+    # 提取 Token
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token_b64 = auth_header[7:]
+    else:
+        token_b64 = auth_header
+
+    if not token_b64:
+        raise HTTPException(401, "缺少认证 Token")
+
     try:
-        signature = base64.b64decode(signature_b64)
-        PUBLIC_KEY.verify(
-            signature,
-            sign_content.encode('utf-8'),
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )
-    except Exception:
-        raise HTTPException(401, "签名验证失败")
+        # 解密 Token
+        token_data = decrypt_token(token_b64, token_key)
+        user_id = token_data["user_id"]
 
-    return employee_id
+        # 验证用户编号格式（必须为9位数字）
+        if not user_id.isdigit() or len(user_id) != 9:
+            raise HTTPException(400, "用户编号格式错误")
+
+        return user_id
+
+    except ValueError as e:
+        raise HTTPException(401, str(e))
 ```
 
-### 9.3 签名防伪造原理
+### 9.3 安全机制说明
+
+**为什么使用加密 Token 而不是多 Header 方式？**
+
+| 对比项 | 多 Header 方式 | 加密 Token 方式（原型验证） |
+|--------|----------------|---------------------------|
+| 实现复杂度 | 需要签名和验证 | 仅需加密解密 |
+| 身份隔离 | 本地代理知道员工编号 | 本地代理不知道员工编号 |
+| 传输开销 | 3 个 Header | 1 个 Header |
+| 修改难度 | 修改 Header 即可 | 需要解密才能修改 |
+
+**原型验证结论**：加密 Token 方式更安全，本地代理无法查看用户身份，有效防止 IDOR 攻击。
+
+### 9.4 攻击防御分析
 
 ```
-攻击场景: 黑客尝试伪造 HTTP Header
+攻击场景: 黑客尝试伪造身份
 
-1. 黑客构造请求:
-   X-Employee-ID: EMP99999 (目标员工)
-   X-Credential-Signature: ??? (需要签名)
-   X-Credential-Expires: 2026-05-24T18:00:00Z
+1. 黑客尝试修改 Token:
+   Token = "伪造的Token"
 
-2. 签名验证内容:
-   sign_content = "EMP99999:2026-05-24T18:00:00Z"
+2. 解密失败:
+   - Token 使用 AES-256-GCM 加密
+   - 没有密钥无法解密
+   - 解密失败返回 401
 
-3. 验证失败原因:
-   - 签名需要用 RSA 私钥生成
-   - 黑客没有私钥，无法生成有效签名
-   - 使用其他凭证的签名会导致验证失败
+3. 黑客尝试重放过期 Token:
+   - Token 包含 expires_at
+   - 服务端验证有效期
+   - 过期 Token 返回 401
 
-4. 结论: 无法伪造
+4. 结论: 无法伪造或重放
 ```
 
 ---
 
 ## 10. MCP Server 集成
 
-### 9.1 服务架构
+> **原型验证说明**：原型验证了远端 MCP 服务的完整实现，包括 Token 解密、MCP 协议处理、notification 处理等。
+
+### 10.1 服务架构
 
 MCP Server 使用 FastAPI 作为 HTTP 层，FastMCP 作为 MCP 协议处理层：
 
@@ -874,170 +1080,150 @@ MCP Server 使用 FastAPI 作为 HTTP 层，FastMCP 作为 MCP 协议处理层�
 HTTP 请求 → FastAPI 中间件（认证） → MCP JSON-RPC 处理 → Tool 执行
 ```
 
-### 9.2 完整服务实现
+### 10.2 完整服务实现（原型验证）
 
 ```python
 import os
+import sys
+import json
+import base64
 import logging
+from datetime import datetime, timezone
 from contextvars import ContextVar
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:
+    print("错误: 需要安装 cryptography 库")
+    sys.exit(1)
+
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 当前员工上下文（每个请求独立）
-current_employee_id: ContextVar[str] = ContextVar("current_employee_id")
+# 当前用户上下文（每个请求独立）
+current_user_id: ContextVar[str] = ContextVar("current_user_id")
 
 # 创建 MCP 服务
-mcp = FastMCP("SecureFinanceService")
+mcp = FastMCP("FinanceService")
 
 # FastAPI 应用
-app = FastAPI(title="MCP 安全认证服务")
+app = FastAPI(title="MCP 远端服务")
 
-# RSA 公钥（用于验证签名）
-PUBLIC_KEY = load_public_key()  # 从配置加载
+# 配置
+BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8000")
+
+# Token 加密密钥（从环境变量读取）
+_TOKEN_KEY_B64 = os.environ.get("TOKEN_KEY")
+if _TOKEN_KEY_B64:
+    TOKEN_KEY = base64.b64decode(_TOKEN_KEY_B64)
+else:
+    # 原型测试时使用固定密钥（生产环境必须从环境变量读取）
+    TOKEN_KEY = b'prototype-test-key-32-bytes-!!!!'  # 32 bytes
+    logger.warning("使用测试密钥，生产环境请设置 TOKEN_KEY 环境变量")
 
 
-# ==================== 认证验证 ====================
+# ==================== Token 解密 ====================
 
-async def verify_employee_headers(request: Request) -> str:
-    """
-    验证 HTTP Header 中的员工身份
-
-    Returns:
-        验证通过的员工编号
-
-    Raises:
-        HTTPException: 认证失败
-    """
-    employee_id = request.headers.get("X-Employee-ID")
-    signature_b64 = request.headers.get("X-Credential-Signature")
-    expires_at_str = request.headers.get("X-Credential-Expires")
-
-    # 1. 检查必要 Header
-    if not all([employee_id, signature_b64, expires_at_str]):
-        raise HTTPException(401, "缺少认证信息")
-
-    # 2. 检查有效期
+def decrypt_token(token_b64: str) -> dict:
+    """解密 Token 获取用户身份"""
     try:
+        encrypted = base64.b64decode(token_b64)
+        if len(encrypted) < 12:
+            raise ValueError("Token 格式错误")
+        nonce = encrypted[:12]
+        ciphertext_with_tag = encrypted[12:]
+        aesgcm = AESGCM(TOKEN_KEY)
+        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
+        token_data = json.loads(plaintext.decode('utf-8'))
+        if 'user_id' not in token_data or 'expires_at' not in token_data:
+            raise ValueError("Token 缺少必要字段")
+        expires_at_str = token_data['expires_at']
         expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
         if datetime.now(timezone.utc) > expires_at:
-            raise HTTPException(401, "凭证已过期")
+            raise ValueError("Token 已过期")
+        return token_data
     except ValueError:
-        raise HTTPException(400, "无效的过期时间格式")
+        raise
+    except Exception as e:
+        raise ValueError(f"Token 解密失败: {str(e)}")
 
-    # 3. 验证签名
-    sign_content = f"{employee_id}:{expires_at_str}"
+
+# ==================== 认证中间件 ====================
+
+async def verify_request(request: Request) -> str:
+    """验证请求并返回用户编号"""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token_b64 = auth_header[7:]
+    else:
+        token_b64 = auth_header
+
+    if not token_b64:
+        raise HTTPException(401, "缺少认证 Token")
+
     try:
-        signature = base64.b64decode(signature_b64)
-        PUBLIC_KEY.verify(
-            signature,
-            sign_content.encode('utf-8'),
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )
-    except Exception:
-        raise HTTPException(401, "签名验证失败")
-
-    logger.info(f"员工认证成功: {employee_id}")
-    return employee_id
+        token_data = decrypt_token(token_b64)
+        user_id = token_data["user_id"]
+        if not user_id.isdigit() or len(user_id) != 9:
+            raise HTTPException(400, "用户编号格式错误")
+        logger.info(f"用户认证成功: {user_id}")
+        return user_id
+    except ValueError as e:
+        raise HTTPException(401, str(e))
 
 
 # ==================== MCP Tools 定义 ====================
 
 @mcp.tool()
+async def get_my_info() -> dict:
+    """获取当前用户的信息"""
+    user_id = current_user_id.get()
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
+        if response.status_code == 404:
+            return {"error": "用户不存在"}
+        response.raise_for_status()
+        return response.json()
+
+
+@mcp.tool()
 async def get_my_balance() -> dict:
-    """
-    获取当前用户的账户余额
-
-    注意：不接受任何用户标识参数，身份从上下文获取
-    """
-    employee_id = current_employee_id.get()
-
-    # 数据库查询强制使用当前员工编号
-    return db.query(
-        "SELECT account_no, balance FROM accounts WHERE owner_id = ?",
-        employee_id
-    )
-
-
-@mcp.tool()
-async def get_my_transactions(month: str, limit: int = 10) -> list:
-    """
-    获取当前用户的交易记录
-
-    参数:
-        month: 月份，格式 YYYY-MM
-        limit: 返回记录数量限制
-    """
-    employee_id = current_employee_id.get()
-
-    return db.query(
-        """SELECT date, amount, type, description
-           FROM transactions
-           WHERE emp_id = ? AND date LIKE ?
-           ORDER BY date DESC LIMIT ?""",
-        employee_id, f"{month}%", limit
-    )
-
-
-@mcp.tool()
-async def get_department_summary() -> dict:
-    """
-    获取部门财务汇总（需要管理员权限）
-    """
-    employee_id = current_employee_id.get()
-
-    # 权限检查
-    user_roles = get_user_roles(employee_id)
-    if "admin" not in user_roles:
-        raise PermissionError("权限不足：需要管理员角色")
-
-    # 记录审计日志
-    log_audit(actor=employee_id, action="view_department_summary")
-
-    return db.query(
-        "SELECT * FROM department_summary WHERE dept = ?",
-        get_user_department(employee_id)
-    )
+    """获取当前用户的账户余额"""
+    user_id = current_user_id.get()
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
+        if response.status_code == 404:
+            return {"error": "用户不存在"}
+        response.raise_for_status()
+        user_data = response.json()
+        return {
+            "user_id": user_id,
+            "name": user_data.get("name"),
+            "balance": user_data.get("balance", 0)
+        }
 
 
 # ==================== MCP 请求端点 ====================
 
 @app.post("/mcp")
 async def handle_mcp_request(request: Request):
-    """
-    处理 MCP JSON-RPC 请求
-
-    1. 验证认证信息
-    2. 注入员工上下文
-    3. 根据 method 调用对应的 MCP 方法
-    """
+    """处理 MCP JSON-RPC 请求"""
     try:
-        # 验证认证
-        employee_id = await verify_employee_headers(request)
+        user_id = await verify_request(request)
+        current_user_id.set(user_id)
 
-        # 注入员工上下文
-        current_employee_id.set(employee_id)
-
-        # 获取 MCP 请求体
         mcp_request = await request.json()
         method = mcp_request.get("method", "")
         request_id = mcp_request.get("id")
 
-        # 记录审计日志
-        logger.info(f"MCP 请求: method={method}, employee={employee_id}")
+        logger.info(f"MCP 请求: method={method}, user={user_id}")
 
-        # 根据 method 处理请求
         if method == "tools/list":
-            # 返回工具列表
             tools = await mcp.list_tools()
             return {
                 "jsonrpc": "2.0",
@@ -1046,11 +1232,9 @@ async def handle_mcp_request(request: Request):
             }
 
         elif method == "tools/call":
-            # 调用工具
             params = mcp_request.get("params", {})
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
-
             result = await mcp.call_tool(tool_name, arguments)
             return {
                 "jsonrpc": "2.0",
@@ -1059,18 +1243,33 @@ async def handle_mcp_request(request: Request):
             }
 
         elif method == "initialize":
-            # 初始化响应
             return {
                 "jsonrpc": "2.0",
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "SecureFinanceService", "version": "1.0.0"}
+                    "serverInfo": {"name": "FinanceService", "version": "1.0.0"}
                 },
                 "id": request_id
             }
 
+        elif method == "notifications/initialized":
+            # notification 不需要响应
+            logger.info(f"客户端初始化完成: user={user_id}")
+            return None
+
+        elif method == "ping":
+            return {
+                "jsonrpc": "2.0",
+                "result": {},
+                "id": request_id
+            }
+
         else:
+            # 未知方法：notification 不返回错误，request 返回错误
+            if request_id is None:
+                logger.warning(f"忽略未知 notification: {method}")
+                return None
             return {
                 "jsonrpc": "2.0",
                 "error": {"code": -32601, "message": f"Method not found: {method}"},
@@ -1101,7 +1300,7 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)
 ```
 
-### 9.3 关键实现要点
+### 10.3 关键实现要点
 
 | 要点 | 说明 |
 |------|------|
@@ -1110,9 +1309,51 @@ if __name__ == "__main__":
 | **JSON-RPC 2.0** | 响应必须包含 `jsonrpc`、`result`/`error`、`id` 字段 |
 | **认证前置** | 在调用 MCP 方法前完成认证，失败直接返回 401 |
 | **工具签名** | 工具函数不接受 `user_id` 参数，从上下文获取 |
+| **Notification 处理** | `notifications/initialized` 返回 None，不发送响应 |
+| **协议版本** | 使用 `2024-11-05` MCP 协议版本 |
 
-### 9.4 工具函数设计原则
+### 10.4 MCP Notification 处理说明
+
+**原型验证发现**：MCP 协议中有两种消息类型：
+
+| 类型 | 特点 | 处理方式 |
+|------|------|----------|
+| **Request** | 有 `id` 字段，需要响应 | 必须返回响应 |
+| **Notification** | 没有 `id` 字段，不需要响应 | 返回 `None` |
+
+**关键代码**：
+```python
+elif method == "notifications/initialized":
+    # notification 不需要响应
+    logger.info(f"客户端初始化完成: user={user_id}")
+    return None  # 不返回响应
+
+# 未知方法处理
+else:
+    if request_id is None:
+        # notification 类型，不返回错误
+        logger.warning(f"忽略未知 notification: {method}")
+        return None
+    # request 类型，返回错误
+    return {
+        "jsonrpc": "2.0",
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
+        "id": request_id
+    }
 ```
+
+### 10.5 工具函数设计原则
+
+遵循 IDOR 防御核心原则：
+
+| 设计方式 | 工具定义 | 风险 |
+|----------|----------|------|
+| ❌ **危险** | `get_user_info(user_id)` | 模型会尝试填入任意数字 |
+| ✅ **安全** | `get_my_balance()` | 身份从上下文获取 |
+| ✅ **安全** | `get_my_transactions(limit=10)` | 身份从上下文获取 |
+| ✅ **安全** | `check_my_permission()` | 身份从上下文获取 |
+
+**关键原则**：工具函数名以 `my_` 开头，不接受 `user_id` 参数，从 `ContextVar` 获取当前用户身份。
 
 ---
 
