@@ -42,6 +42,20 @@ Sidecar 模式解决了这些问题：
 | **透明转发** | 本地代理不感知具体业务，只负责认证注入 |
 | **分层审计** | 本地代理记录请求日志，远端记录业务日志 |
 
+### 1.3 Token 机制
+
+采用 **Access Token + Refresh Token** 双 Token 机制：
+
+| Token 类型 | 有效期 | 用途 | 存储 |
+|------------|--------|------|------|
+| **Access Token** | 15 分钟 | 调用 MCP API | 内存（自动刷新） |
+| **Refresh Token** | 7 天（可配置） | 获取新 Access Token | `.mcp.json` 配置 |
+
+**安全优势**：
+- Access Token 有效期短，即使泄露风险有限
+- Refresh Token 支持吊销，泄露后可立即止损
+- 本地代理自动刷新，用户无感知
+
 ---
 
 ## 2. 架构设计
@@ -58,8 +72,15 @@ Sidecar 模式解决了这些问题：
 │  │                 │      │                 │                              │
 │  │                 │      │ ┌─────────────┐ │                              │
 │  │                 │      │ │ 环境变量读取 │ │                              │
-│  │                 │      │ │ • MCP_AUTH_  │ │                              │
-│  │                 │      │ │   TOKEN      │ │                              │
+│  │                 │      │ │ • MCP_REFRESH│ │                              │
+│  │                 │      │ │   _TOKEN    │ │                              │
+│  │                 │      │ └─────────────┘ │                              │
+│  │                 │      │                 │                              │
+│  │                 │      │ ┌─────────────┐ │                              │
+│  │                 │      │ │Token 刷新   │ │                              │
+│  │                 │      │ │ • Access    │ │                              │
+│  │                 │      │ │   Token缓存 │ │                              │
+│  │                 │      │ │ • 自动刷新  │ │                              │
 │  │                 │      │ └─────────────┘ │                              │
 │  │                 │      │                 │                              │
 │  │                 │      │  职责:          │                              │
@@ -138,12 +159,14 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
 ```
 输入: Claude Code 的 MCP JSON-RPC 请求 (Stdio)
 处理:
-  1. 读取环境变量 MCP_AUTH_TOKEN（加密 Token）
-  2. 保持原始 MCP 请求不变
-  3. 在 HTTP Header 中添加:
-     - Authorization: Bearer <加密Token>
-  4. 通过 HTTPS 转发到远端服务
-  5. 记录请求日志（可选）
+  1. 读取环境变量 MCP_REFRESH_TOKEN（Refresh Token）
+  2. 调用远端 /auth/refresh 获取 Access Token
+  3. 缓存 Access Token（有效期 15 分钟）
+  4. Access Token 过期时自动刷新
+  5. 在 HTTP Header 中添加:
+     - Authorization: Bearer <Access Token>
+  6. 通过 HTTPS 转发到远端服务
+  7. 记录请求日志（可选）
 输出: 远端服务的响应
 ```
 
@@ -154,15 +177,23 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
 处理:
   1. 从 Authorization Header 提取加密 Token
   2. AES-256-GCM 解密 Token
-  3. 验证有效期（expires_at）
-  4. 提取 user_id，验证格式（必须为9位数字）
-  5. 将用户编号存入上下文 (ContextVar)
-  6. 解析 MCP JSON-RPC 请求
-  7. 执行对应的 Tool
-  8. Tool 从上下文获取用户编号，调用后台 API
-  9. 记录审计日志
+  3. 验证 Token 类型（必须是 Access Token）
+  4. 验证有效期（expires_at）
+  5. 提取 user_id，验证格式（必须为9位数字）
+  6. 将用户编号存入上下文 (ContextVar)
+  7. 解析 MCP JSON-RPC 请求
+  8. 执行对应的 Tool
+  9. Tool 从上下文获取用户编号，调用后台 API
+  10. 记录审计日志
 输出: Tool 执行结果
 ```
+
+**新增端点**：
+
+| 端点 | 用途 |
+|------|------|
+| `/auth/refresh` | 使用 Refresh Token 获取新 Access Token |
+| `/auth/revoke` | 吊销 Refresh Token |
 
 #### 后台 API
 
@@ -409,356 +440,96 @@ uvicorn>=0.23.0
 
 ### 5.3 远端 MCP 服务代码
 
-**`prototype/mcp_remote/main.py`**:
+**关键变更**：新增 `/auth/refresh` 和 `/auth/revoke` 端点，支持 Token 刷新和吊销。
+
+**`prototype/mcp_remote/main.py`**（核心部分）:
 
 ```python
 """
 远端 MCP 服务
 
 提供真正的 MCP 服务，定义所有 Tools。
-从加密 Token 解密获取用户编号，用于数据查询。
+从加密 Token 中解密获取用户编号，用于数据查询。
 
-关键安全原则：
-- Tools 不接受 user_id 参数
-- 用户编号从加密 Token 解密获取
-- 所有数据查询强制使用当前用户编号
+Token 机制：
+- Access Token: 15 分钟有效期，用于 API 调用
+- Refresh Token: 7 天有效期，用于获取新 Access Token
+- Access Token 无需吊销（有效期短）
+- Refresh Token 支持吊销
 """
 
-import os
-import sys
-import json
-import base64
-import logging
-from datetime import datetime, timezone
-from contextvars import ContextVar
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
-import httpx
-from mcp.server.fastmcp import FastMCP
+# ... 导入和配置 ...
 
-try:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-except ImportError:
-    print("错误: 需要安装 cryptography 库")
-    sys.exit(1)
+# Token 类型
+TOKEN_TYPE_ACCESS = "access"
+TOKEN_TYPE_REFRESH = "refresh"
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Access Token 有效期
+ACCESS_TOKEN_EXPIRES_MINUTES = 15
 
-# 当前用户上下文（每个请求独立）
-current_user_id: ContextVar[str] = ContextVar("current_user_id")
+# ==================== Token 刷新端点 ====================
 
-# 创建 MCP 服务
-mcp = FastMCP("FinanceService")
+@app.post("/auth/refresh")
+async def refresh_token(request: Request):
+    """
+    使用 Refresh Token 获取新的 Access Token
 
-# FastAPI 应用
-app = FastAPI(title="MCP 远端服务")
+    请求: {"refresh_token": "xxx"}
+    响应: {"access_token": "yyy", "expires_in": 900}
+    """
+    data = await request.json()
+    refresh_token = data.get("refresh_token")
 
-# 配置
-BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8000")
+    # 验证 Refresh Token
+    token_data = decrypt_token(refresh_token)
 
-# Token 加密密钥（从环境变量读取）
-_TOKEN_KEY_B64 = os.environ.get("TOKEN_KEY")
-if _TOKEN_KEY_B64:
-    TOKEN_KEY = base64.b64decode(_TOKEN_KEY_B64)
-else:
-    # 原型测试时使用固定密钥
-    TOKEN_KEY = b'prototype-test-key-32-bytes-!!!!'
-    logger.warning("使用测试密钥，生产环境请设置 TOKEN_KEY 环境变量")
+    if token_data.get("token_type") != TOKEN_TYPE_REFRESH:
+        raise HTTPException(401, "需要 Refresh Token")
+
+    # 检查吊销黑名单
+    if is_token_revoked(token_data["jti"]):
+        raise HTTPException(401, "Token 已被吊销")
+
+    # 生成新的 Access Token
+    access_token = generate_access_token(token_data["user_id"])
+
+    return {"access_token": access_token, "expires_in": 900}
+
+
+@app.post("/auth/revoke")
+async def revoke_token(request: Request):
+    """吊销 Refresh Token"""
+    data = await request.json()
+    jti = data.get("jti")
+
+    # 添加到黑名单
+    add_to_revoked_list(jti)
+
+    # 更新 Token 记录状态
+    update_token_status(jti, "revoked")
+
+    return {"status": "revoked"}
 
 
 # ==================== Token 解密 ====================
 
 def decrypt_token(token_b64: str) -> dict:
-    """
-    解密 Token 获取用户身份
-
-    Args:
-        token_b64: Base64 编码的加密 Token
-
-    Returns:
-        包含 user_id, expires_at 的字典
-
-    Raises:
-        ValueError: Token 无效或过期
-    """
-    try:
-        # 1. Base64 解码
-        encrypted = base64.b64decode(token_b64)
-
-        # 2. 解析 nonce 和 ciphertext
-        if len(encrypted) < 12:
-            raise ValueError("Token 格式错误")
-        nonce = encrypted[:12]
-        ciphertext_with_tag = encrypted[12:]
-
-        # 3. AES-GCM 解密
-        aesgcm = AESGCM(TOKEN_KEY)
-        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
-
-        # 4. 解析 JSON
-        token_data = json.loads(plaintext.decode('utf-8'))
-
-        # 5. 验证必要字段
-        if 'user_id' not in token_data or 'expires_at' not in token_data:
-            raise ValueError("Token 缺少必要字段")
-
-        # 6. 验证有效期
-        expires_at_str = token_data['expires_at']
-        expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
-        if datetime.now(timezone.utc) > expires_at:
-            raise ValueError("Token 已过期")
-
-        return token_data
-
-    except Exception as e:
-        if isinstance(e, ValueError):
-            raise
-        raise ValueError(f"Token 解密失败: {str(e)}")
+    """解密 Token，返回包含 user_id, token_type, jti, expires_at 的字典"""
+    # AES-GCM 解密逻辑...
+    return token_data
 
 
-# ==================== 认证中间件 ====================
+# ==================== MCP 端点验证 ====================
 
 async def verify_request(request: Request) -> str:
-    """
-    验证请求并返回用户编号
+    """验证请求，必须是 Access Token"""
+    token_data = decrypt_token(access_token)
 
-    从 Authorization Header 提取加密 Token，解密获取用户编号。
+    # 验证 Token 类型
+    if token_data.get("token_type") != TOKEN_TYPE_ACCESS:
+        raise HTTPException(401, "需要 Access Token")
 
-    Returns:
-        验证通过的用户编号
-
-    Raises:
-        HTTPException: 认证失败
-    """
-    # 提取 Token
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token_b64 = auth_header[7:]
-    else:
-        token_b64 = auth_header
-
-    if not token_b64:
-        logger.warning("缺少认证 Token")
-        raise HTTPException(401, "缺少认证 Token")
-
-    try:
-        # 解密 Token
-        token_data = decrypt_token(token_b64)
-        user_id = token_data["user_id"]
-
-        # 验证用户编号格式（必须为9位数字）
-        if not user_id.isdigit() or len(user_id) != 9:
-            logger.warning(f"用户编号格式错误: {user_id}")
-            raise HTTPException(400, "用户编号格式错误")
-
-        logger.info(f"用户认证成功: {user_id}")
-        return user_id
-
-    except ValueError as e:
-        logger.warning(f"Token 验证失败: {e}")
-        raise HTTPException(401, str(e))
-
-
-# ==================== MCP Tools 定义 ====================
-
-@mcp.tool()
-async def get_my_info() -> dict:
-    """
-    获取当前用户的信息
-
-    返回当前登录用户的详细信息，包括姓名、部门、角色等。
-    不接受任何用户标识参数，身份从认证上下文获取。
-    """
-    user_id = current_user_id.get()
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
-        if response.status_code == 404:
-            return {"error": "用户不存在"}
-        response.raise_for_status()
-        return response.json()
-
-
-@mcp.tool()
-async def get_my_department() -> dict:
-    """
-    获取当前用户所在部门的信息
-
-    返回当前用户所属部门的基本信息。
-    """
-    user_id = current_user_id.get()
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
-        if response.status_code == 404:
-            return {"error": "用户不存在"}
-        response.raise_for_status()
-        user_data = response.json()
-        return {
-            "user_id": user_id,
-            "name": user_data.get("name"),
-            "department": user_data.get("department")
-        }
-
-
-@mcp.tool()
-async def get_my_balance() -> dict:
-    """
-    获取当前用户的账户余额
-
-    返回当前用户的财务余额信息。
-    """
-    user_id = current_user_id.get()
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
-        if response.status_code == 404:
-            return {"error": "用户不存在"}
-        response.raise_for_status()
-        user_data = response.json()
-        return {
-            "user_id": user_id,
-            "name": user_data.get("name"),
-            "balance": user_data.get("balance", 0)
-        }
-
-
-@mcp.tool()
-async def check_my_permission() -> dict:
-    """
-    检查当前用户的权限
-
-    返回当前用户的角色和基本权限信息。
-    """
-    user_id = current_user_id.get()
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
-        if response.status_code == 404:
-            return {"error": "用户不存在"}
-        response.raise_for_status()
-        user_data = response.json()
-        role = user_data.get("role", "unknown")
-
-        return {
-            "user_id": user_id,
-            "name": user_data.get("name"),
-            "role": role,
-            "permissions": {
-                "can_view": True,
-                "can_edit": role == "admin",
-                "can_delete": role == "admin",
-                "can_approve": role == "admin"
-            }
-        }
-
-
-# ==================== MCP 请求端点 ====================
-
-@app.post("/mcp")
-async def handle_mcp_request(request: Request):
-    """
-    处理 MCP JSON-RPC 请求
-
-    1. 验证认证信息（解密 Token）
-    2. 注入用户上下文
-    3. 根据 method 调用对应的 MCP 方法
-    """
-    try:
-        # 验证认证（解密 Token 获取 user_id）
-        user_id = await verify_request(request)
-
-        # 注入用户上下文
-        current_user_id.set(user_id)
-
-        # 获取 MCP 请求体
-        mcp_request = await request.json()
-        method = mcp_request.get("method", "")
-        request_id = mcp_request.get("id")
-
-        # 记录审计日志
-        logger.info(f"MCP 请求: method={method}, user={user_id}")
-
-        # 根据 method 处理请求
-        if method == "tools/list":
-            tools = await mcp.list_tools()
-            return {
-                "jsonrpc": "2.0",
-                "result": {"tools": tools},
-                "id": request_id
-            }
-
-        elif method == "tools/call":
-            params = mcp_request.get("params", {})
-            tool_name = params.get("name")
-            arguments = params.get("arguments", {})
-
-            result = await mcp.call_tool(tool_name, arguments)
-            return {
-                "jsonrpc": "2.0",
-                "result": {"content": [{"type": "text", "text": str(result)}]},
-                "id": request_id
-            }
-
-        elif method == "initialize":
-            return {
-                "jsonrpc": "2.0",
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "FinanceService", "version": "1.0.0"}
-                },
-                "id": request_id
-            }
-
-        elif method == "notifications/initialized":
-            # initialized notification 不需要响应
-            logger.info(f"客户端初始化完成: user={user_id}")
-            return None
-
-        elif method == "ping":
-            # ping 请求
-            return {
-                "jsonrpc": "2.0",
-                "result": {},
-                "id": request_id
-            }
-
-        else:
-            # 未知方法：notification 不返回错误，request 返回错误
-            if request_id is None:
-                logger.warning(f"忽略未知 notification: {method}")
-                return None
-            return {
-                "jsonrpc": "2.0",
-                "error": {"code": -32601, "message": f"Method not found: {method}"},
-                "id": request_id
-            }
-
-    except HTTPException as e:
-        return JSONResponse(
-            status_code=e.status_code,
-            content={"error": e.detail}
-        )
-    except Exception as e:
-        logger.error(f"处理 MCP 请求失败: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"内部服务器错误: {str(e)}"}
-        )
-
-
-@app.get("/health")
-async def health():
-    """健康检查"""
-    return {"status": "ok"}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    return token_data["user_id"]
 ```
 
 **`prototype/mcp_remote/requirements.txt`**:
@@ -773,260 +544,119 @@ cryptography>=41.0.0
 
 ### 5.4 本地代理代码
 
-**`prototype/local_proxy/main.py`**:
+**关键变更**：新增 `TokenRefreshManager` 类，支持 Access Token 自动刷新。
+
+**`prototype/local_proxy/main.py`**（核心部分）:
 
 ```python
 """
 MCP 协议透传代理
 
-本地代理作为 MCP Server 实现：
-- 接收 Claude Code 的 MCP 请求 (Stdio)
-- 使用 Server 实例处理 MCP 协议握手
-- 在每个请求中自动注入加密 Token
-- 通过 HTTPS 转发到远端 MCP 服务
-- 返回远端服务的响应
-
 关键特性：
 - Tools 定义在远端服务，本地代理通过 HTTP 获取
 - 用户身份封装在加密 Token 中，本地代理无法查看
-- Token 从环境变量读取，模型无法修改
-
-安全设计：
-- 本地代理只知道 Token，不知道用户身份
-- 用户身份由远端服务从 Token 解密获取
-- 有效期由 Token 内部控制，无法绕过
+- 使用 Refresh Token 自动获取 Access Token
+- Access Token 过期时自动刷新
 """
 
-import os
-import sys
-import json
-import logging
-import httpx
+# ... 导入 ...
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+# ==================== Token 刷新管理 ====================
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    stream=sys.stderr  # 日志输出到 stderr，不影响 stdio 通信
-)
-logger = logging.getLogger(__name__)
-
-
-def get_config() -> dict:
+class TokenRefreshManager:
     """
-    获取配置
+    管理 Refresh Token，自动获取 Access Token
 
-    Returns:
-        包含 token 和 remote_url 的字典
-
-    Raises:
-        ValueError: 配置缺失
+    流程：
+    1. 从环境变量读取 MCP_REFRESH_TOKEN
+    2. 调用远端 /auth/refresh 获取 Access Token
+    3. Access Token 过期时自动刷新
     """
-    token = os.environ.get("MCP_AUTH_TOKEN")
-    remote_url = os.environ.get("REMOTE_MCP_URL", "http://localhost:8001")
 
-    if not token:
-        raise ValueError("未配置认证令牌，请设置环境变量 MCP_AUTH_TOKEN")
+    def __init__(self, remote_url: str):
+        self.remote_url = remote_url
+        self.refresh_token = os.environ.get("MCP_REFRESH_TOKEN")
+        self.access_token = None
+        self.access_token_expires_at = None
 
-    return {
-        "token": token,
-        "remote_url": remote_url
-    }
+        # 兼容旧配置：如果设置了 MCP_AUTH_TOKEN，使用它
+        self.legacy_token = os.environ.get("MCP_AUTH_TOKEN")
 
+    async def get_valid_access_token(self) -> str:
+        """
+        获取有效的 Access Token
 
-# ==================== 远端通信 ====================
+        如果 Access Token 即将过期（< 1分钟），自动刷新。
+        """
+        # 传统模式：直接返回 MCP_AUTH_TOKEN
+        if self.legacy_token and not self.refresh_token:
+            return self.legacy_token
 
-async def fetch_tools_from_remote(ctx: dict) -> list[Tool]:
-    """
-    从远端获取工具列表并转换为 Tool 对象
+        now = datetime.now(timezone.utc)
 
-    Args:
-        ctx: 配置上下文
+        # 检查缓存的 Access Token 是否有效
+        if self.access_token and self.access_token_expires_at:
+            if now < self.access_token_expires_at - timedelta(minutes=1):
+                return self.access_token
 
-    Returns:
-        Tool 对象列表
-    """
-    try:
+        # 需要刷新
+        logger.info("Access Token 即将过期，正在刷新...")
+
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
-                f"{ctx['remote_url']}/mcp",
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/list"
-                },
-                headers={
-                    "Authorization": f"Bearer {ctx['token']}",
-                    "Content-Type": "application/json"
-                }
+                f"{self.remote_url}/auth/refresh",
+                json={"refresh_token": self.refresh_token}
             )
 
-            if response.status_code != 200:
-                logger.error(f"获取工具列表失败: HTTP {response.status_code}")
-                return []
-
             data = response.json()
-            if "error" in data:
-                logger.error(f"远端返回错误: {data['error']}")
-                return []
+            self.access_token = data.get("access_token")
+            self.access_token_expires_at = now + timedelta(seconds=data["expires_in"])
 
-            tools_data = data.get("result", {}).get("tools", [])
-            logger.info(f"从远端获取 {len(tools_data)} 个工具")
-
-            # 转换为 Tool 对象
-            tools = []
-            for t in tools_data:
-                try:
-                    tool_dict = {
-                        "name": t.get("name"),
-                        "description": t.get("description"),
-                        "inputSchema": t.get("inputSchema", {"type": "object", "properties": {}})
-                    }
-                    tools.append(Tool(**tool_dict))
-                except Exception as e:
-                    logger.warning(f"转换工具失败: {t.get('name')}, {e}")
-
-            return tools
-
-    except Exception as e:
-        logger.error(f"获取工具列表异常: {e}")
-        return []
-
-
-async def call_tool_on_remote(name: str, arguments: dict, ctx: dict) -> str:
-    """
-    在远端调用工具
-
-    Args:
-        name: 工具名称
-        arguments: 工具参数
-        ctx: 配置上下文
-
-    Returns:
-        工具执行结果（字符串）
-    """
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{ctx['remote_url']}/mcp",
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {
-                        "name": name,
-                        "arguments": arguments
-                    }
-                },
-                headers={
-                    "Authorization": f"Bearer {ctx['token']}",
-                    "Content-Type": "application/json"
-                }
-            )
-
-            if response.status_code != 200:
-                return f"远端服务错误: HTTP {response.status_code}"
-
-            data = response.json()
-
-            if "error" in data:
-                error_msg = data["error"].get("message", "未知错误")
-                return f"工具执行失败: {error_msg}"
-
-            # 提取结果
-            result = data.get("result", {})
-            content = result.get("content", [])
-            if content and isinstance(content, list) and len(content) > 0:
-                text_content = content[0]
-                if isinstance(text_content, dict):
-                    return text_content.get("text", str(result))
-                elif isinstance(text_content, str):
-                    return text_content
-                else:
-                    return str(text_content)
-
-            return str(result)
-
-    except httpx.ConnectError as e:
-        logger.error(f"无法连接远端服务: {e}")
-        return "无法连接远端服务"
-    except Exception as e:
-        logger.error(f"调用工具异常: {e}")
-        return f"调用失败: {str(e)}"
+            logger.info(f"Access Token 刷新成功，有效期 {data['expires_in']} 秒")
+            return self.access_token
 
 
 # ==================== MCP 服务器实现 ====================
 
 async def run_server():
     """运行 MCP 服务器"""
-    # 获取配置
-    ctx = get_config()
+    remote_url = os.environ.get("REMOTE_MCP_URL", "http://localhost:8001")
 
-    logger.info(f"MCP 代理启动，目标: {ctx['remote_url']}")
-
-    # 预加载工具列表
-    remote_tools = await fetch_tools_from_remote(ctx)
-    logger.info(f"已加载 {len(remote_tools)} 个工具")
+    # 创建 Token 管理器
+    token_manager = TokenRefreshManager(remote_url)
 
     # 创建 MCP Server 实例
     server = Server("finance-proxy")
 
-    # 注册 list_tools 处理器
     @server.list_tools()
     async def list_tools():
         """返回远端工具列表"""
-        tools = await fetch_tools_from_remote(ctx)
+        tools = await fetch_tools_from_remote(token_manager)
         return tools
 
-    # 注册 call_tool 处理器
     @server.call_tool()
     async def call_tool(name: str, arguments: dict):
         """代理工具调用"""
-        logger.info(f"调用工具: {name}, 参数: {arguments}")
-        result = await call_tool_on_remote(name, arguments, ctx)
+        # 获取有效 Access Token（自动刷新）
+        access_token = await token_manager.get_valid_access_token()
+
+        # 调用远端服务...
+        result = await call_tool_on_remote(name, arguments, token_manager)
         return [TextContent(type="text", text=result)]
 
-    # 使用 stdio_server 创建传输层
-    async with stdio_server() as (read_stream, write_stream):
-        logger.info("MCP 服务器已启动，等待连接...")
-
-        # 获取初始化选项
-        init_options = server.create_initialization_options()
-
-        # 运行服务器
-        await server.run(read_stream, write_stream, init_options)
-
-
-def main():
-    """主入口"""
-    import anyio
-    try:
-        anyio.run(run_server)
-    except ValueError as e:
-        logger.error(f"配置错误: {e}")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"启动失败: {e}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+    # ... 运行服务器 ...
 ```
 
 **关键设计点**：
 
 | 设计 | 说明 |
 |------|------|
+| **TokenRefreshManager** | 管理 Refresh Token，自动获取和刷新 Access Token |
+| **Access Token 缓存** | 缓存 Access Token，过期前 1 分钟自动刷新 |
 | **Server 实例** | 使用 `mcp.server.Server` 创建真正的 MCP 服务器 |
 | **list_tools 处理器** | 从远端获取工具列表并转换为 `Tool` 对象 |
 | **call_tool 处理器** | 转发工具调用到远端，返回 `TextContent` 结果 |
-| **initialization_options** | 使用 `server.create_initialization_options()` 获取默认初始化选项 |
-| **工具自动注册** | Claude Code 通过 MCP 协议自动发现并注册工具 |
+| **兼容旧配置** | 支持 `MCP_AUTH_TOKEN` 环境变量（传统模式） |
 
 **`prototype/local_proxy/config.py`**:
 
@@ -1078,7 +708,7 @@ MCP 配置文件位置：
       "args": ["/data/bank-services-plugins/prototype/local_proxy/main.py"],
       "env": {
         "REMOTE_MCP_URL": "http://localhost:8001",
-        "MCP_AUTH_TOKEN": "<使用 prototype/tools/generate_token.py 生成>"
+        "MCP_REFRESH_TOKEN": "<使用 prototype/tools/generate_token.py 生成>"
       }
     }
   }
@@ -1087,8 +717,9 @@ MCP 配置文件位置：
 
 **注意**：
 - `args` 中的路径必须使用**绝对路径**
-- `MCP_AUTH_TOKEN` 使用 `prototype/tools/generate_token.py` 生成
-- 用户身份封装在 Token 中，无需单独配置 `MCP_USER_ID`
+- `MCP_REFRESH_TOKEN` 使用 `prototype/tools/generate_token.py` 生成
+- 用户身份封装在 Refresh Token 中，无需单独配置 `MCP_USER_ID`
+- 兼容旧配置：可使用 `MCP_AUTH_TOKEN`（传统模式，无自动刷新）
 
 ### 6.2 启用 MCP 服务
 
@@ -1102,7 +733,8 @@ MCP 配置文件位置：
 | 变量名 | 说明 | 示例 | 必需 |
 |--------|------|------|------|
 | `REMOTE_MCP_URL` | 远端 MCP 服务地址 | `http://localhost:8001` | ✅ |
-| `MCP_AUTH_TOKEN` | 加密认证令牌 | 使用 `generate_token.py` 生成 | ✅ |
+| `MCP_REFRESH_TOKEN` | Refresh Token（推荐） | 使用 `generate_token.py` 生成 | ✅ |
+| `MCP_AUTH_TOKEN` | 传统 Token（兼容旧配置） | 使用 `generate_token.py` 生成 | ⚠️ |
 
 ### 6.4 远端服务配置
 
@@ -1113,15 +745,16 @@ MCP 配置文件位置：
 
 ### 6.5 Token 生成
 
-使用 `prototype/tools/generate_token.py` 生成加密 Token：
+使用 `prototype/tools/generate_token.py` 生成 Access Token 和 Refresh Token：
 
 ```bash
 # 生成密钥（首次使用）
 python prototype/tools/generate_token.py --generate-key
 
-# 生成 Token（有效期单位：小时）
-python prototype/tools/generate_token.py --user-id 000000001 --expires 8
-# --expires 8 表示 Token 有效期为 8 小时
+# 生成 Token 对（Refresh Token 有效 7 天）
+python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
+# --refresh-expires 7 表示 Refresh Token 有效期为 7 天
+# Access Token 固定 15 分钟有效期
 ```
 
 **参数说明**：
@@ -1131,7 +764,23 @@ python prototype/tools/generate_token.py --user-id 000000001 --expires 8
 | `--generate-key` | 生成新的 AES-256 密钥 | - |
 | `--show-key` | 显示当前密钥（Base64） | - |
 | `--user-id` | 用户编号（9位数字） | 必需 |
-| `--expires` | Token 有效期（**小时**） | 8 |
+| `--refresh-expires` | Refresh Token 有效期（**天**） | 7 |
+
+**Token 记录**：
+
+生成的 Token 会记录到 `prototype/tools/token_records.json`：
+
+```json
+[
+  {
+    "user_id": "000000001",
+    "refresh_jti": "abc123",
+    "refresh_expires_at": "2026-06-01T10:00:00Z",
+    "issued_at": "2026-05-25T10:00:00Z",
+    "status": "active"
+  }
+]
+```
 
 ---
 
@@ -1232,8 +881,8 @@ python prototype/tools/generate_token.py --show-key
 # 输出: TOKEN_KEY=xxx（Base64 编码的 32 字节密钥）
 
 # 步骤 3: 使用密钥生成 Token
-python prototype/tools/generate_token.py --user-id 000000001 --expires 8
-# 输出: MCP_AUTH_TOKEN=xxx（加密后的 Token）
+python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
+# 输出: MCP_REFRESH_TOKEN=xxx（Refresh Token）
 ```
 
 #### 7.4.3 Token 生成完整流程
@@ -1247,11 +896,23 @@ python prototype/tools/generate_token.py --user-id 000000001 --expires 8
 │     └── 若不存在，使用 --generate-key 生成                       │
 │                                                                 │
 │  2. 构造 Token 数据                                              │
-│     {                                                           │
-│       "user_id": "000000001",                                   │
-│       "expires_at": "2026-05-25T18:00:00Z",  // 当前时间 + N小时 │
-│       "issued_at": "2026-05-25T10:00:00Z"    // 当前时间         │
-│     }                                                           │
+│     ├── Access Token:                                            │
+│     │   {                                                        │
+│     │     "user_id": "000000001",                                │
+│     │     "token_type": "access",                                │
+│     │     "jti": "xyz789",                                       │
+│     │     "expires_at": "2026-05-25T10:15:00Z", // +15 分钟      │
+│     │     "issued_at": "2026-05-25T10:00:00Z"                    │
+│     │   }                                                        │
+│     │                                                            │
+│     └── Refresh Token:                                           │
+│         {                                                        │
+│           "user_id": "000000001",                                │
+│           "token_type": "refresh",                               │
+│           "jti": "abc123",                                       │
+│           "expires_at": "2026-06-01T10:00:00Z", // +7 天         │
+│           "issued_at": "2026-05-25T10:00:00Z"                    │
+│         }                                                        │
 │                                                                 │
 │  3. AES-256-GCM 加密                                            │
 │     ├── 生成随机 nonce (12 bytes)                               │
@@ -1259,7 +920,10 @@ python prototype/tools/generate_token.py --user-id 000000001 --expires 8
 │     └── 组装: nonce + ciphertext + tag                          │
 │                                                                 │
 │  4. Base64 编码                                                  │
-│     └── 输出: MCP_AUTH_TOKEN=xxx                                │
+│     └── 输出: MCP_REFRESH_TOKEN=xxx                             │
+│                                                                 │
+│  5. 记录 Token 信息                                              │
+│     └── 保存到 token_records.json                               │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -1288,11 +952,14 @@ python prototype/tools/generate_token.py --user-id 000000001 --expires 8
 │  5. 解析 JSON                                                    │
 │     └── token_data = json.loads(plaintext)                      │
 │                                                                 │
-│  6. 验证有效期                                                   │
+│  6. 验证 Token 类型                                              │
+│     └── if token_type != "access": raise "需要 Access Token"    │
+│                                                                 │
+│  7. 验证有效期                                                   │
 │     ├── expires_at = token_data["expires_at"]                   │
 │     └── if now > expires_at: raise "Token 已过期"               │
 │                                                                 │
-│  7. 返回用户身份                                                  │
+│  8. 返回用户身份                                                  │
 │     └── user_id = token_data["user_id"]                         │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘

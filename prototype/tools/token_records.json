@@ -1,0 +1,16 @@
+[
+  {
+    "user_id": "000000001",
+    "refresh_jti": "cVxyXpm_JNtVvrXKUJQZmQ",
+    "refresh_expires_at": "2026-06-01T04:49:11Z",
+    "issued_at": "2026-05-25T04:49:11Z",
+    "status": "active"
+  },
+  {
+    "user_id": "000000001",
+    "refresh_jti": "3J4qw1UmU9W1O4j3ZlqJlA",
+    "refresh_expires_at": "2026-06-01T04:59:28Z",
+    "issued_at": "2026-05-25T04:59:28Z",
+    "status": "active"
+  }
+]

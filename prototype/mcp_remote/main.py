@@ -8,6 +8,12 @@
 - Tools 不接受 user_id 参数
 - 用户编号从加密 Token 解密获取
 - 所有数据查询强制使用当前用户编号
+
+Token 机制：
+- Access Token: 15 分钟有效期，用于 API 调用
+- Refresh Token: 7 天有效期，用于获取新 Access Token
+- Access Token 无需吊销（有效期短）
+- Refresh Token 支持吊销
 """
 
 import os
@@ -15,7 +21,9 @@ import sys
 import json
 import base64
 import logging
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from contextvars import ContextVar
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -54,6 +62,70 @@ else:
     TOKEN_KEY = b'prototype-test-key-32-bytes-!!!!'  # 32 bytes
     logger.warning("使用测试密钥，生产环境请设置 TOKEN_KEY 环境变量")
 
+# Token 类型
+TOKEN_TYPE_ACCESS = "access"
+TOKEN_TYPE_REFRESH = "refresh"
+
+# Access Token 有效期
+ACCESS_TOKEN_EXPIRES_MINUTES = 15
+
+# 文件路径（与 tools 目录共享）
+TOOLS_DIR = Path(__file__).parent.parent / "tools"
+REVOKED_TOKENS_FILE = TOOLS_DIR / "revoked_tokens.json"
+TOKEN_RECORDS_FILE = TOOLS_DIR / "token_records.json"
+
+
+# ==================== 吊销黑名单管理 ====================
+
+def load_revoked_tokens() -> set:
+    """加载吊销的 Token JTI 黑名单"""
+    if REVOKED_TOKENS_FILE.exists():
+        with open(REVOKED_TOKENS_FILE, 'r') as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_revoked_tokens(revoked_set: set):
+    """保存吊销黑名单"""
+    with open(REVOKED_TOKENS_FILE, 'w') as f:
+        json.dump(list(revoked_set), f, indent=2)
+
+
+def is_token_revoked(jti: str) -> bool:
+    """检查 Token 是否被吊销"""
+    revoked = load_revoked_tokens()
+    return jti in revoked
+
+
+def add_to_revoked_list(jti: str):
+    """添加到吊销黑名单"""
+    revoked = load_revoked_tokens()
+    revoked.add(jti)
+    save_revoked_tokens(revoked)
+
+
+def load_token_records() -> list:
+    """加载 Token 记录"""
+    if TOKEN_RECORDS_FILE.exists():
+        with open(TOKEN_RECORDS_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+
+def save_token_records(records: list):
+    """保存 Token 记录"""
+    with open(TOKEN_RECORDS_FILE, 'w') as f:
+        json.dump(records, f, indent=2, ensure_ascii=False)
+
+
+def update_token_status(jti: str, status: str):
+    """更新 Token 记录状态"""
+    records = load_token_records()
+    for record in records:
+        if record.get("refresh_jti") == jti:
+            record["status"] = status
+    save_token_records(records)
+
 
 # ==================== Token 解密 ====================
 
@@ -65,7 +137,7 @@ def decrypt_token(token_b64: str) -> dict:
         token_b64: Base64 编码的加密 Token
 
     Returns:
-        包含 user_id, expires_at 的字典
+        包含 user_id, token_type, jti, expires_at 的字典
 
     Raises:
         ValueError: Token 无效或过期
@@ -105,6 +177,123 @@ def decrypt_token(token_b64: str) -> dict:
         raise ValueError(f"Token 解密失败: {str(e)}")
 
 
+# ==================== Token 生成 ====================
+
+def generate_access_token(user_id: str) -> str:
+    """
+    生成新的 Access Token
+
+    Args:
+        user_id: 用户编号
+
+    Returns:
+        Base64 编码的加密 Token
+    """
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=ACCESS_TOKEN_EXPIRES_MINUTES)
+    jti = secrets.token_urlsafe(16)
+
+    token_data = {
+        "user_id": user_id,
+        "token_type": TOKEN_TYPE_ACCESS,
+        "jti": jti,
+        "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    }
+
+    # AES-GCM 加密
+    aesgcm = AESGCM(TOKEN_KEY)
+    nonce = os.urandom(12)
+    plaintext = json.dumps(token_data).encode('utf-8')
+    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+
+    # 组装并 Base64 编码
+    encrypted = nonce + ciphertext
+    return base64.b64encode(encrypted).decode('utf-8')
+
+
+# ==================== 认证端点 ====================
+
+@app.post("/auth/refresh")
+async def refresh_token(request: Request):
+    """
+    使用 Refresh Token 获取新的 Access Token
+
+    请求: {"refresh_token": "xxx"}
+    响应: {"access_token": "yyy", "expires_in": 900}
+    """
+    try:
+        data = await request.json()
+        refresh_token = data.get("refresh_token")
+
+        if not refresh_token:
+            raise HTTPException(400, "缺少 refresh_token")
+
+        # 验证 Refresh Token
+        token_data = decrypt_token(refresh_token)
+
+        if token_data.get("token_type") != TOKEN_TYPE_REFRESH:
+            raise HTTPException(401, "需要 Refresh Token")
+
+        # 检查吊销黑名单
+        jti = token_data.get("jti")
+        if is_token_revoked(jti):
+            raise HTTPException(401, "Token 已被吊销")
+
+        user_id = token_data["user_id"]
+
+        # 生成新的 Access Token
+        access_token = generate_access_token(user_id)
+
+        logger.info(f"Token 刷新成功: user={user_id}")
+
+        return {
+            "access_token": access_token,
+            "expires_in": ACCESS_TOKEN_EXPIRES_MINUTES * 60  # 秒
+        }
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.warning(f"Token 刷新失败: {e}")
+        raise HTTPException(401, str(e))
+    except Exception as e:
+        logger.error(f"Token 刷新异常: {e}")
+        raise HTTPException(500, "刷新失败")
+
+
+@app.post("/auth/revoke")
+async def revoke_token(request: Request):
+    """
+    吊销 Refresh Token
+
+    请求: {"jti": "abc123"}
+    响应: {"status": "revoked"}
+    """
+    try:
+        data = await request.json()
+        jti = data.get("jti")
+
+        if not jti:
+            raise HTTPException(400, "缺少 jti")
+
+        # 添加到黑名单
+        add_to_revoked_list(jti)
+
+        # 更新 Token 记录状态
+        update_token_status(jti, "revoked")
+
+        logger.info(f"Token 已吊销: jti={jti}")
+
+        return {"status": "revoked"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"吊销 Token 异常: {e}")
+        raise HTTPException(500, "吊销失败")
+
+
 # ==================== 认证中间件 ====================
 
 async def verify_request(request: Request) -> str:
@@ -134,6 +323,11 @@ async def verify_request(request: Request) -> str:
         # 解密 Token
         token_data = decrypt_token(token_b64)
         user_id = token_data["user_id"]
+
+        # 验证 Token 类型（必须是 Access Token）
+        token_type = token_data.get("token_type", TOKEN_TYPE_ACCESS)
+        if token_type != TOKEN_TYPE_ACCESS:
+            raise HTTPException(401, "需要 Access Token")
 
         # 验证用户编号格式（必须为9位数字）
         if not user_id.isdigit() or len(user_id) != 9:

@@ -1,18 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Token 生成工具
 
-用于原型测试时生成加密 Token。
-Token 包含 user_id 和 expires_at，使用 AES-256-GCM 加密。
+用于生成 Access Token 和 Refresh Token 对。
+- Access Token: 15 分钟有效期，用于 API 调用
+- Refresh Token: 可配置有效期（默认 7 天），用于获取新 Access Token
 
 使用方法:
     # 生成密钥并保存
     python generate_token.py --generate-key
 
-    # 生成 Token（使用保存的密钥）
-    python generate_token.py --user-id 000000001 --expires 8
+    # 生成 Token 对
+    python generate_token.py --user-id 000000001 --refresh-expires 7
 
-    # 或者指定密钥
-    TOKEN_KEY=<base64密钥> python generate_token.py --user-id 000000001 --expires 8
+    # 查看密钥
+    python generate_token.py --show-key
 """
 
 import os
@@ -21,9 +24,7 @@ import json
 import base64
 import argparse
 from datetime import datetime, timezone, timedelta
-
-# 添加父目录到路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from pathlib import Path
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -33,8 +34,18 @@ except ImportError:
     sys.exit(1)
 
 
-# 密钥文件路径
-KEY_FILE = os.path.join(os.path.dirname(__file__), '.token_key')
+# 文件路径
+TOOLS_DIR = Path(__file__).parent
+KEY_FILE = TOOLS_DIR / ".token_key"
+TOKEN_RECORDS_FILE = TOOLS_DIR / "token_records.json"
+REVOKED_TOKENS_FILE = TOOLS_DIR / "revoked_tokens.json"
+
+# Token 类型
+TOKEN_TYPE_ACCESS = "access"
+TOKEN_TYPE_REFRESH = "refresh"
+
+# Token 有效期
+ACCESS_TOKEN_EXPIRES_MINUTES = 15  # Access Token 固定 15 分钟
 
 
 def generate_key() -> bytes:
@@ -58,7 +69,7 @@ def load_key() -> bytes:
         return base64.b64decode(env_key)
 
     # 其次从文件读取
-    if os.path.exists(KEY_FILE):
+    if KEY_FILE.exists():
         with open(KEY_FILE, 'rb') as f:
             return f.read()
 
@@ -69,26 +80,28 @@ def load_key() -> bytes:
     return key
 
 
-def generate_token(user_id: str, expires_hours: int = 8, key: bytes = None) -> str:
+def generate_token(user_id: str, token_type: str, expires_at: datetime, key: bytes) -> str:
     """
     生成加密 Token
 
     Args:
         user_id: 用户编号（9位数字）
-        expires_hours: 有效期（小时）
-        key: AES-256 密钥（32 bytes），不提供则自动加载
+        token_type: Token 类型 (access/refresh)
+        expires_at: 过期时间
+        key: AES-256 密钥（32 bytes）
 
     Returns:
         Base64 编码的加密 Token
     """
-    if key is None:
-        key = load_key()
+    import secrets
 
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(hours=expires_hours)
+    jti = secrets.token_urlsafe(16)  # Token 唯一标识
 
     token_data = {
         "user_id": user_id,
+        "token_type": token_type,
+        "jti": jti,
         "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")
     }
@@ -101,17 +114,32 @@ def generate_token(user_id: str, expires_hours: int = 8, key: bytes = None) -> s
 
     # 组装并 Base64 编码
     encrypted = nonce + ciphertext
-    return base64.b64encode(encrypted).decode('utf-8')
+    return base64.b64encode(encrypted).decode('utf-8'), jti
+
+
+def load_token_records() -> list:
+    """加载 Token 记录"""
+    if TOKEN_RECORDS_FILE.exists():
+        with open(TOKEN_RECORDS_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+
+def save_token_records(records: list):
+    """保存 Token 记录"""
+    with open(TOKEN_RECORDS_FILE, 'w') as f:
+        json.dump(records, f, indent=2, ensure_ascii=False)
+    os.chmod(TOKEN_RECORDS_FILE, 0o600)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='生成加密 Token')
+    parser = argparse.ArgumentParser(description='生成 Access Token 和 Refresh Token')
     parser.add_argument('--generate-key', action='store_true',
                         help='生成新的 AES-256 密钥并保存')
     parser.add_argument('--user-id', type=str,
                         help='用户编号（9位数字）')
-    parser.add_argument('--expires', type=int, default=8,
-                        help='有效期（小时），默认 8 小时')
+    parser.add_argument('--refresh-expires', type=int, default=7,
+                        help='Refresh Token 有效期（天），默认 7 天')
     parser.add_argument('--show-key', action='store_true',
                         help='显示当前密钥（Base64）')
 
@@ -140,11 +168,45 @@ def main():
             print(f"错误: 用户编号必须为9位数字，当前: {args.user_id}")
             sys.exit(1)
 
-        # 生成 Token
-        token = generate_token(args.user_id, args.expires)
+        # 加载密钥
+        key = load_key()
+
+        now = datetime.now(timezone.utc)
+
+        # 生成 Access Token（15 分钟有效）
+        access_expires = now + timedelta(minutes=ACCESS_TOKEN_EXPIRES_MINUTES)
+        access_token, access_jti = generate_token(
+            args.user_id, TOKEN_TYPE_ACCESS, access_expires, key
+        )
+
+        # 生成 Refresh Token（可配置天数）
+        refresh_expires = now + timedelta(days=args.refresh_expires)
+        refresh_token, refresh_jti = generate_token(
+            args.user_id, TOKEN_TYPE_REFRESH, refresh_expires, key
+        )
+
+        # 保存 Token 记录
+        records = load_token_records()
+        records.append({
+            "user_id": args.user_id,
+            "refresh_jti": refresh_jti,
+            "refresh_expires_at": refresh_expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "status": "active"
+        })
+        save_token_records(records)
+
+        # 输出结果
         print(f"# 用户编号: {args.user_id}")
-        print(f"# 有效期: {args.expires} 小时")
-        print(f"MCP_AUTH_TOKEN={token}")
+        print(f"# Access Token 有效期: {ACCESS_TOKEN_EXPIRES_MINUTES} 分钟")
+        print(f"# Refresh Token 有效期: {args.refresh_expires} 天")
+        print(f"# Token 记录已保存到: {TOKEN_RECORDS_FILE}")
+        print()
+        print(f"MCP_REFRESH_TOKEN={refresh_token}")
+        print()
+        print("# 将此 Refresh Token 配置到 .mcp.json 的 env 中:")
+        print('# "MCP_REFRESH_TOKEN": "<Refresh Token>"')
+
         return
 
     # 无参数时显示帮助
