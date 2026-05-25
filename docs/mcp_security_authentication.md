@@ -575,7 +575,76 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
 - Claude Code 通过本地代理自动发现远端工具
 - 用户身份封装在加密 Token 中，本地代理无法查看或修改
 
-### 8.3 本地代理实现代码
+### 8.3 Token 刷新管理
+
+本地代理使用 `TokenRefreshManager` 类管理 Access Token 自动刷新：
+
+```python
+class TokenRefreshManager:
+    """
+    管理 Refresh Token，自动获取 Access Token
+
+    流程：
+    1. 从环境变量读取 MCP_REFRESH_TOKEN
+    2. 调用远端 /auth/refresh 获取 Access Token
+    3. Access Token 过期时自动刷新
+    """
+
+    def __init__(self, remote_url: str):
+        self.remote_url = remote_url
+        self.refresh_token = os.environ.get("MCP_REFRESH_TOKEN")
+        self.access_token = None
+        self.access_token_expires_at = None
+
+        # 兼容旧配置：如果设置了 MCP_AUTH_TOKEN，使用它
+        self.legacy_token = os.environ.get("MCP_AUTH_TOKEN")
+
+        if not self.refresh_token and not self.legacy_token:
+            raise ValueError("未配置认证令牌，请设置环境变量 MCP_REFRESH_TOKEN")
+
+    async def get_valid_access_token(self) -> str:
+        """
+        获取有效的 Access Token
+
+        如果 Access Token 即将过期（< 1分钟），自动刷新。
+        """
+        # 传统模式：直接返回 MCP_AUTH_TOKEN
+        if self.legacy_token and not self.refresh_token:
+            return self.legacy_token
+
+        now = datetime.now(timezone.utc)
+
+        # 检查缓存的 Access Token 是否有效（预留 1 分钟）
+        if self.access_token and self.access_token_expires_at:
+            if now < self.access_token_expires_at - timedelta(minutes=1):
+                return self.access_token
+
+        # 需要刷新
+        logger.info("Access Token 即将过期，正在刷新...")
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{self.remote_url}/auth/refresh",
+                json={"refresh_token": self.refresh_token}
+            )
+
+            data = response.json()
+            self.access_token = data.get("access_token")
+            self.access_token_expires_at = now + timedelta(seconds=data["expires_in"])
+
+            logger.info(f"Access Token 刷新成功，有效期 {data['expires_in']} 秒")
+            return self.access_token
+```
+
+**关键设计点**：
+
+| 设计 | 说明 |
+|------|------|
+| **Access Token 缓存** | 缓存 Access Token，过期前 1 分钟自动刷新 |
+| **兼容旧配置** | 支持 `MCP_AUTH_TOKEN` 环境变量（传统模式，无自动刷新） |
+| **错误处理** | 刷新失败时抛出异常，由调用方处理 |
+
+### 8.4 本地代理实现代码
 
 > **重要提示**：本地代理使用 `mcp.server.Server` 类实现真正的 MCP 服务器，通过 stdio 与 Claude Code 通信，动态获取远端工具列表。
 
@@ -832,7 +901,7 @@ if __name__ == "__main__":
 | **initialization_options** | 使用 `server.create_initialization_options()` 获取默认初始化选项 |
 | **工具自动注册** | Claude Code 通过 MCP 协议自动发现并注册工具 |
 
-### 8.4 Claude Code 配置
+### 8.5 Claude Code 配置
 
 MCP 配置文件位置：
 
@@ -848,15 +917,23 @@ MCP 配置文件位置：
   "mcpServers": {
     "finance-proxy": {
       "command": "python",
-      "args": ["prototype/local_proxy/main.py"],
+      "args": ["/absolute/path/to/prototype/local_proxy/main.py"],
       "env": {
         "REMOTE_MCP_URL": "http://localhost:8001",
-        "MCP_AUTH_TOKEN": "<使用 generate_token.py 生成>"
+        "MCP_REFRESH_TOKEN": "<使用 generate_token.py 生成>"
       }
     }
   }
 }
 ```
+
+**环境变量说明**：
+
+| 变量名 | 说明 | 必需 |
+|--------|------|------|
+| `REMOTE_MCP_URL` | 远端 MCP 服务地址 | ✅ |
+| `MCP_REFRESH_TOKEN` | Refresh Token（推荐，支持自动刷新） | ✅ |
+| `MCP_AUTH_TOKEN` | 传统 Token（兼容旧配置，无自动刷新） | ⚠️ |
 
 **注意**：
 - `args` 中的路径必须使用**绝对路径**
@@ -870,7 +947,21 @@ MCP 配置文件位置：
 
 > **原型验证说明**：原型验证了使用加密 Token 的认证方式，用户身份封装在 Token 中，本地代理无法查看。以下是基于原型验证的设计。
 
-### 9.1 客户端请求格式
+### 9.1 Token 机制概述
+
+原型验证了 **Access Token + Refresh Token** 双 Token 机制：
+
+| Token 类型 | 有效期 | 用途 | 存储 |
+|------------|--------|------|------|
+| **Access Token** | 15 分钟 | 调用 MCP API | 内存（自动刷新） |
+| **Refresh Token** | 7 天（可配置） | 获取新 Access Token | `.mcp.json` 配置 |
+
+**安全优势**：
+- Access Token 有效期短，即使泄露风险有限
+- Refresh Token 支持吊销，泄露后可立即止损
+- 本地代理自动刷新，用户无感知
+
+### 9.2 客户端请求格式
 
 原型验证了使用单一 Bearer Token 的认证方式：
 
@@ -878,14 +969,27 @@ MCP 配置文件位置：
 POST /mcp HTTP/1.1
 Host: mcp-server.example.com
 Content-Type: application/json
-Authorization: Bearer <加密Token>
+Authorization: Bearer <Access Token>
 ```
 
-**Token 内容（加密后）**：
+**Access Token 内容（加密后）**：
 ```json
 {
   "user_id": "000000001",
-  "expires_at": "2026-05-25T18:00:00Z",
+  "token_type": "access",
+  "jti": "xyz789",
+  "expires_at": "2026-05-25T10:15:00Z",
+  "issued_at": "2026-05-25T10:00:00Z"
+}
+```
+
+**Refresh Token 内容（加密后）**：
+```json
+{
+  "user_id": "000000001",
+  "token_type": "refresh",
+  "jti": "abc123",
+  "expires_at": "2026-06-01T10:00:00Z",
   "issued_at": "2026-05-25T10:00:00Z"
 }
 ```
@@ -893,37 +997,51 @@ Authorization: Bearer <加密Token>
 | 字段 | 说明 | 示例 |
 |------|------|------|
 | user_id | 用户编号（9位数字） | 000000001 |
+| token_type | Token 类型 | access / refresh |
+| jti | Token 唯一标识（用于吊销） | abc123 |
 | expires_at | Token 过期时间 (ISO 8601) | 2026-05-25T18:00:00Z |
 | issued_at | Token 签发时间 | 2026-05-25T10:00:00Z |
 
-### 9.2 Token 加密与解密
+### 9.2 Token 生成（认证系统）
 
-#### 9.2.1 Token 生成（认证系统）
+Token 分为两种类型，都在服务器端生成：
 
 ```python
 import os
 import json
 import base64
+import secrets
 from datetime import datetime, timezone, timedelta
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-def generate_token(user_id: str, expires_hours: int, key: bytes) -> str:
+# Token 类型
+TOKEN_TYPE_ACCESS = "access"
+TOKEN_TYPE_REFRESH = "refresh"
+
+# Access Token 固定 15 分钟有效期
+ACCESS_TOKEN_EXPIRES_MINUTES = 15
+
+
+def generate_token(user_id: str, token_type: str, expires_at: datetime, key: bytes) -> tuple:
     """
     生成加密 Token
 
     Args:
         user_id: 用户编号（9位数字）
-        expires_hours: 有效期（小时）
+        token_type: Token 类型 (access/refresh)
+        expires_at: 过期时间
         key: AES-256 密钥（32 bytes）
 
     Returns:
-        Base64 编码的加密 Token
+        (Base64 编码的加密 Token, jti)
     """
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(hours=expires_hours)
+    jti = secrets.token_urlsafe(16)  # Token 唯一标识
 
     token_data = {
         "user_id": user_id,
+        "token_type": token_type,
+        "jti": jti,
         "expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")
     }
@@ -936,10 +1054,47 @@ def generate_token(user_id: str, expires_hours: int, key: bytes) -> str:
 
     # 组装并 Base64 编码
     encrypted = nonce + ciphertext
-    return base64.b64encode(encrypted).decode('utf-8')
+    return base64.b64encode(encrypted).decode('utf-8'), jti
+
+
+def generate_token_pair(user_id: str, refresh_expires_days: int, key: bytes) -> dict:
+    """
+    生成 Access Token + Refresh Token 对
+
+    Args:
+        user_id: 用户编号（9位数字）
+        refresh_expires_days: Refresh Token 有效期（天）
+        key: AES-256 密钥（32 bytes）
+
+    Returns:
+        包含 refresh_token 和 refresh_jti 的字典
+    """
+    now = datetime.now(timezone.utc)
+
+    # Access Token（15 分钟有效）
+    access_expires = now + timedelta(minutes=ACCESS_TOKEN_EXPIRES_MINUTES)
+    access_token, access_jti = generate_token(user_id, TOKEN_TYPE_ACCESS, access_expires, key)
+
+    # Refresh Token（可配置天数）
+    refresh_expires = now + timedelta(days=refresh_expires_days)
+    refresh_token, refresh_jti = generate_token(user_id, TOKEN_TYPE_REFRESH, refresh_expires, key)
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "refresh_jti": refresh_jti,
+        "refresh_expires_at": refresh_expires
+    }
 ```
 
-#### 9.2.2 Token 解密与验证（远端服务）
+**使用示例**：
+
+```bash
+# 生成 Token 对（Refresh Token 有效 7 天）
+python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
+```
+
+#### 9.3.1 Token 解密与验证（远端服务）
 
 ```python
 import base64
@@ -957,7 +1112,7 @@ def decrypt_token(token_b64: str, key: bytes) -> dict:
         key: AES-256 密钥（32 bytes）
 
     Returns:
-        包含 user_id, expires_at 的字典
+        包含 user_id, token_type, jti, expires_at 的字典
 
     Raises:
         ValueError: Token 无效或过期
@@ -1032,7 +1187,167 @@ async def verify_request(request: Request, token_key: bytes) -> str:
         raise HTTPException(401, str(e))
 ```
 
-### 9.3 安全机制说明
+### 9.4 Token 刷新与吊销
+
+#### 9.4.1 Token 刷新流程
+
+当 Access Token 过期时，本地代理自动调用 `/auth/refresh` 端点获取新 Token：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Token 刷新流程                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. 本地代理检测 Access Token 即将过期（< 1 分钟）               │
+│     └── 或 Access Token 已过期                                  │
+│                                                                 │
+│  2. 调用 /auth/refresh 端点                                      │
+│     POST /auth/refresh                                          │
+│     { "refresh_token": "<Refresh Token>" }                      │
+│                                                                 │
+│  3. 远端服务验证 Refresh Token                                   │
+│     ├── 解密 Token                                              │
+│     ├── 验证 token_type == "refresh"                            │
+│     ├── 检查吊销黑名单                                          │
+│     └── 验证有效期                                              │
+│                                                                 │
+│  4. 生成新的 Access Token                                       │
+│     └── 有效期 15 分钟                                          │
+│                                                                 │
+│  5. 返回新 Access Token                                         │
+│     { "access_token": "<new token>", "expires_in": 900 }        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 9.4.2 Token 刷新端点实现
+
+```python
+# Token 类型
+TOKEN_TYPE_ACCESS = "access"
+TOKEN_TYPE_REFRESH = "refresh"
+ACCESS_TOKEN_EXPIRES_MINUTES = 15
+
+# 吊销黑名单文件
+REVOKED_TOKENS_FILE = "prototype/tools/revoked_tokens.json"
+
+
+def load_revoked_tokens() -> set:
+    """加载吊销的 Token JTI 黑名单"""
+    if os.path.exists(REVOKED_TOKENS_FILE):
+        with open(REVOKED_TOKENS_FILE, 'r') as f:
+            return set(json.load(f))
+    return set()
+
+
+def is_token_revoked(jti: str) -> bool:
+    """检查 Token 是否被吊销"""
+    return jti in load_revoked_tokens()
+
+
+@app.post("/auth/refresh")
+async def refresh_token(request: Request):
+    """
+    使用 Refresh Token 获取新的 Access Token
+
+    请求: {"refresh_token": "xxx"}
+    响应: {"access_token": "yyy", "expires_in": 900}
+    """
+    data = await request.json()
+    refresh_token = data.get("refresh_token")
+
+    if not refresh_token:
+        raise HTTPException(400, "缺少 refresh_token")
+
+    # 验证 Refresh Token
+    token_data = decrypt_token(refresh_token, TOKEN_KEY)
+
+    if token_data.get("token_type") != TOKEN_TYPE_REFRESH:
+        raise HTTPException(401, "需要 Refresh Token")
+
+    # 检查吊销黑名单
+    jti = token_data.get("jti")
+    if is_token_revoked(jti):
+        raise HTTPException(401, "Token 已被吊销")
+
+    user_id = token_data["user_id"]
+
+    # 生成新的 Access Token
+    access_token = generate_access_token(user_id)
+
+    return {
+        "access_token": access_token,
+        "expires_in": ACCESS_TOKEN_EXPIRES_MINUTES * 60  # 秒
+    }
+```
+
+#### 9.4.3 Token 吊销机制
+
+当 Refresh Token 泄露或需要禁用时，管理员可调用 `/auth/revoke` 端点吊销：
+
+```python
+def add_to_revoked_list(jti: str):
+    """添加到吊销黑名单"""
+    revoked = load_revoked_tokens()
+    revoked.add(jti)
+    with open(REVOKED_TOKENS_FILE, 'w') as f:
+        json.dump(list(revoked), f, indent=2)
+
+
+@app.post("/auth/revoke")
+async def revoke_token(request: Request):
+    """
+    吊销 Refresh Token
+
+    请求: {"jti": "abc123"}
+    响应: {"status": "revoked"}
+    """
+    data = await request.json()
+    jti = data.get("jti")
+
+    if not jti:
+        raise HTTPException(400, "缺少 jti")
+
+    # 添加到黑名单
+    add_to_revoked_list(jti)
+
+    return {"status": "revoked"}
+```
+
+**吊销流程**：
+
+```bash
+# 1. 查看 Token 清单找到 jti
+cat prototype/tools/token_records.json
+
+# 2. 调用吊销接口
+curl -X POST http://localhost:8001/auth/revoke \
+  -H "Content-Type: application/json" \
+  -d '{"jti": "abc123"}'
+```
+
+**说明**：
+- Access Token 有效期短（15 分钟），无需吊销检查
+- Refresh Token 需要检查吊销黑名单
+- 吊销黑名单存储在 `prototype/tools/revoked_tokens.json`
+
+#### 9.4.4 Token 清单记录
+
+所有生成的 Token 记录在 `prototype/tools/token_records.json`：
+
+```json
+[
+  {
+    "user_id": "000000001",
+    "refresh_jti": "abc123",
+    "refresh_expires_at": "2026-06-01T10:00:00Z",
+    "issued_at": "2026-05-25T10:00:00Z",
+    "status": "active"
+  }
+]
+```
+
+### 9.5 安全机制说明
 
 **为什么使用加密 Token 而不是多 Header 方式？**
 
@@ -1045,7 +1360,7 @@ async def verify_request(request: Request, token_key: bytes) -> str:
 
 **原型验证结论**：加密 Token 方式更安全，本地代理无法查看用户身份，有效防止 IDOR 攻击。
 
-### 9.4 攻击防御分析
+### 9.6 攻击防御分析
 
 ```
 攻击场景: 黑客尝试伪造身份
@@ -1169,6 +1484,12 @@ async def verify_request(request: Request) -> str:
     try:
         token_data = decrypt_token(token_b64)
         user_id = token_data["user_id"]
+
+        # 验证 Token 类型（必须是 Access Token）
+        token_type = token_data.get("token_type", "access")
+        if token_type != "access":
+            raise HTTPException(401, "需要 Access Token")
+
         if not user_id.isdigit() or len(user_id) != 9:
             raise HTTPException(400, "用户编号格式错误")
         logger.info(f"用户认证成功: {user_id}")
@@ -1359,6 +1680,17 @@ else:
 
 ## 11. 安全特性总结
 
+### 11.1 Token 安全机制
+
+| 安全威胁 | 防御机制 | 实现位置 |
+|----------|----------|----------|
+| **Token 盗用** | Access Token 15 分钟有效期，风险窗口小 | Token 有效期 |
+| **Token 泄露** | Refresh Token 支持吊销，可立即止损 | 吊销黑名单 |
+| **Token 重放** | Token 包含有效期，过期自动失效 | 有效期验证 |
+| **Token 伪造** | AES-256-GCM 加密，无密钥无法伪造 | Token 加密 |
+
+### 11.2 IDOR 防御机制
+
 | 安全威胁 | 防御机制 | 实现位置 |
 |----------|----------|----------|
 | **遍历用户编号 (IDOR)** | 员工编号从签名凭证获取，无法伪造 | 签名验证 |
@@ -1368,6 +1700,16 @@ else:
 | **暴力破解密码** | PBKDF2 迭代 100000 次，增加破解成本 | 密钥派生 |
 | **重放攻击** | 有效期控制，过期需重新生成 | 有效期验证 |
 | **伪造 HTTP Header** | 签名验证确保 Header 不可伪造 | 服务端验证 |
+
+### 11.3 安全改进对比
+
+| 对比项 | 原方案 | 新方案（双 Token） |
+|--------|--------|-------------------|
+| Token 有效期 | 8 小时 | 15 分钟（Access）/ 7 天（Refresh） |
+| 盗用风险窗口 | 8 小时 | 15 分钟 |
+| Token 吊销 | 不支持 | ✅ 支持（Refresh Token 黑名单） |
+| 自动刷新 | 不支持 | ✅ 支持 |
+| Token 清单 | 无 | ✅ 服务器记录 |
 
 ---
 
