@@ -5,8 +5,9 @@
       "args": ["/data/bank-services-plugins/prototype/local_proxy/main.py"],
       "env": {
         "REMOTE_MCP_URL": "http://localhost:8001",
-        "MCP_AUTH_TOKEN": "5fNiUvK99juDen6qGPWmZS8c3dCmN38CBBhbSaSTdA6QOH0iN0Xr9cOeQ5SzvMWeWU4sHieEwY6TOuEKPAYS/dij1CSVOzsdemXN143hM+U51BT2IVpNsp/RTsEqEalwdqbfA/Xz2DKZ3UczldBNzslVEX2BEYJlg1kcopcjrA=="
+	"MCP_REFRESH_TOKEN": "lpRn4KB4/QK0rj0wGuhH6TRY0ML3AaXtAhQa31dSjwybRd+yE/3VYXg9BmYwvu4tqWgCDyxTCgc6An4pPHQ6JUWdS7QEGtMgj65O+eikHGR6zaXNP1MfK3AnLl+mf67oa0t7qnJKWTynjh0AHY7o1qxTh/1EBJbgsTHLkvGOguQf/sRE+QwUQVd9gqA+6uTmQ+8tascmZRkjxvkiffq6c6ei3rvXFqGU6EVGlKgsO55EatZN8Kht/QE="
       }
+
     }
   }
 }
