@@ -37,6 +37,18 @@
    - 大宽表/数据仓库场景指南
    - 自动化验证脚本
 
+6. **财务数字分身 MVP 接口** (2026-05-26)
+   - 后台 API 新增财务端点：
+     - `/api/finance/dictionary` - 财务指标元数据字典
+     - `/api/finance/query` - 财务指标查询（白名单验证 + RLS）
+   - MCP Remote 新增财务工具：
+     - `get_finance_dictionary` - 获取财务指标字典
+     - `query_financial_metrics` - 查询财务指标数据
+   - 模拟数据：
+     - 8 个财务指标（净利润、不良率等）
+     - 2 个机构（BR001、BR002）RLS 测试
+     - 3 年数据（2023-2025）趋势分析
+
 ### 进行中
 
 （暂无）
@@ -50,6 +62,12 @@
 ## 更新日志
 
 ### 2026-05-26
+- 新增财务数字分身 MVP 接口：
+  - 创建 `prototype/backend_api/config/dictionary.py` 财务指标字典配置
+  - 修改 `prototype/backend_api/main.py` 新增 2 个财务端点
+  - 修改 `prototype/mcp_remote/main.py` 新增 2 个财务工具
+  - 修复 `secure_api_call` 装饰器使用 `functools.wraps` 保留函数名
+  - 模拟数据支持 8 个指标、2 个机构、3 年历史
 - 新增 MCP 工具描述最佳实践文档 (v1.1.0)：
   - 术语规范、工具复杂度分类、命名规范
   - 常见工具模式库、性能和调用限制

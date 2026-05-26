@@ -22,6 +22,7 @@ import json
 import base64
 import logging
 import secrets
+import functools
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from contextvars import ContextVar
@@ -60,6 +61,7 @@ def secure_api_call(func):
     统一处理 API 调用异常，确保返回格式化的错误信息。
     防止原始异常信息暴露给大模型，避免干扰模型判断。
     """
+    @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
@@ -518,6 +520,118 @@ async def list_all_users() -> dict:
 
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{BACKEND_API_URL}/api/admin/{user_id}/users")
+        if response.status_code >= 400:
+            return response.json()
+        return response.json()
+
+
+# ==================== 财务相关工具 ====================
+
+@mcp.tool()
+@secure_api_call
+async def get_finance_dictionary() -> dict:
+    """
+    获取财务指标元数据字典。
+
+    当用户询问"有哪些财务指标"、"能查什么数据"、"指标列表"、"财务科目"
+    或"支持查询哪些数据"时调用此工具。
+
+    返回内容：
+    - metrics: 指标列表，每项包含：
+        - standard_name: 标准字段名（用于查询）
+        - display_name: 中文显示名
+        - category: 指标分类（如"盈利能力"、"风险指标"）
+        - unit: 计量单位
+        - description: 含义说明
+        - synonyms: 同义词/别名列表
+    - dimensions: 支持的查询维度
+
+    使用建议：
+    1. 查询具体指标前，先调用此工具确认指标名称
+    2. 根据用户输入的关键词，在 synonyms 中查找匹配项
+    3. 找到匹配后，使用 standard_name 调用 query_financial_metrics
+
+    此工具为只读查询，不接受任何参数。
+    """
+    user_id = current_user_id.get()
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{BACKEND_API_URL}/api/finance/dictionary",
+            headers={"X-User-ID": user_id}
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+@mcp.tool()
+@secure_api_call
+async def query_financial_metrics(
+    metric: str,
+    year: int = None,
+    quarter: int = None,
+    month: int = None,
+    granularity: str = "yearly"
+) -> dict:
+    """
+    查询财务指标数据。
+
+    当用户询问具体财务指标数值时调用此工具，如"去年的净利润"、
+    "一季度的不良率"、"资产负债情况"。
+
+    参数说明：
+    | 参数 | 类型 | 默认值 | 说明 |
+    |------|------|--------|------|
+    | metric | str | 必需 | 指标名，必须是字典中的 standard_name |
+    | year | int | None | 年份（如 2025），不指定则返回最近数据 |
+    | quarter | int | None | 季度（1-4），指定后按季度查询 |
+    | month | int | None | 月份（1-12），指定后按月查询 |
+    | granularity | str | "yearly" | 聚合粒度：yearly/quarterly/monthly |
+
+    常用查询场景示例：
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ 用户问题                        │ 参数设置                      │
+    ├─────────────────────────────────────────────────────────────────┤
+    │ "去年的净利润"                  │ metric="NET_PROFIT",           │
+    │                                 │ year=2025                     │
+    ├─────────────────────────────────────────────────────────────────┤
+    │ "一季度的不良率"                 │ metric="NPL_RATIO",           │
+    │                                 │ year=2025, quarter=1          │
+    ├─────────────────────────────────────────────────────────────────┤
+    │ "最近三年的净利息收入"           │ metric="NET_INTEREST_INCOME", │
+    │                                 │ year 不指定, granularity=      │
+    │                                 │ "yearly"                      │
+    ├─────────────────────────────────────────────────────────────────┤
+    │ "各季度的资产负债总额"           │ metric="TOTAL_ASSETS",        │
+    │                                 │ granularity="quarterly"       │
+    └─────────────────────────────────────────────────────────────────┘
+
+    安全约束：
+    - 此工具仅能查询当前用户所属机构的数据
+    - 不接受任何机构标识参数，机构代码自动过滤
+    - 只能查询字典中定义的指标
+
+    如不确定指标名称，请先调用 get_finance_dictionary 工具获取字典。
+    """
+    user_id = current_user_id.get()
+
+    params = {
+        "metric": metric,
+        "granularity": granularity
+    }
+    if year:
+        params["year"] = year
+    if quarter:
+        params["quarter"] = quarter
+    if month:
+        params["month"] = month
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{BACKEND_API_URL}/api/finance/query",
+            params=params,
+            headers={"X-User-ID": user_id}
+        )
         if response.status_code >= 400:
             return response.json()
         return response.json()
