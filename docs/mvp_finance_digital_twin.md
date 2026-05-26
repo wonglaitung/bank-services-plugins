@@ -1,8 +1,9 @@
 # 银行财务数字分身 MVP 实施方案
 
-> **版本**：1.0.0
+> **版本**：1.1.0
 > **最后更新**：2026-05-26
 > **适用范围**：银行财务数据仓库安全接入 MCP
+> **关键更新**：新增 Skill 固化查询 SOP 章节
 
 ---
 
@@ -15,9 +16,10 @@
 5. [核心业务流程](#5-核心业务流程)
 6. [安全与内控审计](#6-安全与内控审计)
 7. [技术实现细节](#7-技术实现细节)
-8. [项目分阶段演进路线](#8-项目分阶段演进路线)
-9. [实施检查清单](#9-实施检查清单)
-10. [下一步行动指南](#10-下一步行动指南)
+8. [Skill 固化查询 SOP](#8-skill-固化查询-sop)
+9. [项目分阶段演进路线](#9-项目分阶段演进路线)
+10. [实施检查清单](#10-实施检查清单)
+11. [下一步行动指南](#11-下一步行动指南)
 
 ---
 
@@ -840,9 +842,434 @@ async def execute_finance_query(
 
 ---
 
-## 8. 项目分阶段演进路线
+## 8. Skill 固化查询 SOP
 
-### 8.1 演进路线图
+### 8.1 问题背景
+
+AI Agent（如 OpenClaw）的系统提示词由厂商控制，用户无法自定义。这导致：
+
+| 问题 | 说明 |
+|------|------|
+| **查询流程不可控** | Agent 可能跳过字典查询直接尝试调用查询工具 |
+| **错误处理不一致** | 无法统一引导 Agent 进行友好的异常提示 |
+| **语义匹配不稳定** | 不同 Agent 版本对同义词匹配策略可能不同 |
+
+### 8.2 解决方案：Skill 固化 SOP
+
+通过 Claude Code 的 **Skill 机制**，将财务查询的 SOP（标准操作流程）固化到可执行的工作流中。
+
+#### 8.2.1 Skill 设计理念
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Skill 固化 SOP 原理                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  传统方式（不可控）：                                                         │
+│  ┌─────────────────┐                                                        │
+│  │ AI Agent        │  ← 系统提示词不可修改                                    │
+│  │ 自由决策        │  ← 查询流程不稳定                                        │
+│  └─────────────────┘                                                        │
+│                                                                             │
+│  Skill 方式（可控）：                                                         │
+│  ┌─────────────────┐      ┌─────────────────┐                              │
+│  │ 用户输入        │ ───▶ │ Skill 工作流    │                              │
+│  │ "查去年的利润"  │      │ (固化 SOP)      │                              │
+│  └─────────────────┘      └────────┬────────┘                              │
+│                                    │                                        │
+│                                    ▼                                        │
+│                           ┌─────────────────┐                               │
+│                           │ 1. 调用字典工具  │                               │
+│                           │ 2. 本地语义匹配  │                               │
+│                           │ 3. 调用查询工具  │                               │
+│                           │ 4. 格式化输出    │                               │
+│                           └─────────────────┘                               │
+│                                                                             │
+│  核心优势：流程固化、错误处理统一、输出格式标准化                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.3 财务查询 Skill 设计
+
+#### 8.3.1 Skill 目录结构
+
+```
+.claude/skills/finance-query/
+├── SKILL.md                    # 技能文档
+├── finance_query/              # Python 模块
+│   ├── __init__.py
+│   ├── semantic_matcher.py     # 语义匹配逻辑
+│   └── formatter.py            # 输出格式化
+├── scripts/
+│   └── finance_query.py        # CLI 入口
+└── requirements.txt
+```
+
+#### 8.3.2 SKILL.md 文档
+
+```markdown
+# 财务数据查询 Skill
+
+## 功能描述
+
+帮助用户查询银行财务数据，自动完成语义匹配和数据格式化。
+
+## 使用场景
+
+当用户需要查询财务指标时，如：
+- "去年的净利润是多少？"
+- "一季度的不良贷款率"
+- "最近三年的资产总额变化"
+
+## 执行流程
+
+### 步骤 1：获取指标字典
+
+调用 MCP 工具 `get_finance_dictionary`，获取所有支持的指标列表。
+
+### 步骤 2：语义匹配
+
+根据用户输入的关键词，在字典的 synonyms 字段中查找匹配项：
+
+| 用户输入 | 匹配字段 | standard_name |
+|----------|----------|---------------|
+| "纯利润" | synonyms | NET_PROFIT |
+| "不良率" | synonyms | NPL_RATIO |
+| "总资产" | synonyms | TOTAL_ASSETS |
+
+**匹配策略**：
+1. 精确匹配 synonyms 中的任一别名
+2. 模糊匹配（相似度 > 0.8）
+3. 无法匹配时，提示用户可用的指标列表
+
+### 步骤 3：调用查询工具
+
+使用匹配到的 `standard_name` 调用 `query_financial_metrics` 工具。
+
+### 步骤 4：格式化输出
+
+将返回的数据格式化为易读的报告：
+
+```
+📊 财务指标查询结果
+
+指标：净利润（NET_PROFIT）
+时间：2025 年
+单位：万元
+
+┌────────┬────────────┐
+│ 时期   │ 数值       │
+├────────┼────────────┤
+│ 2025   │ 125,000.00 │
+└────────┴────────────┘
+
+数据来源：财务数仓（自动过滤当前用户所属机构）
+查询时间：2026-05-26 10:30:00
+```
+
+### 步骤 5：异常处理
+
+**情况 1：指标无法匹配**
+
+```
+❌ 无法识别的指标："报销差旅费"
+
+目前支持的财务指标包括：
+
+📈 盈利能力：
+  • 净利润（纯利润、税后利润）
+  • 净利息收入（息差收入）
+
+📊 规模指标：
+  • 资产总额（总资产）
+
+⚠️ 风险指标：
+  • 不良贷款率（不良率、NPL）
+  • 资本充足率（CAR）
+
+您可以换个说法，例如："去年的净利润是多少？"
+```
+
+**情况 2：无数据**
+
+```
+⚠️ 查询成功，但未找到数据
+
+查询条件：
+  • 指标：净利润
+  • 年份：2025
+  • 季度：3
+
+可能原因：
+  1. 当前机构暂无该时期数据
+  2. 数据尚未入库
+
+建议：尝试查询其他时间段或指标
+```
+
+## 调用方式
+
+### 命令行
+
+```bash
+# 交互式查询
+/finance-query
+
+# 直接传入问题
+/finance-query "去年的净利润是多少？"
+```
+
+### 自然语言触发
+
+当用户提到财务相关问题时，Claude Code 自动识别并调用此 Skill。
+
+## 注意事项
+
+- 此 Skill 仅支持查询，不支持修改数据
+- 所有查询自动应用 RLS 行级安全过滤
+- 查询结果仅显示当前用户所属机构的数据
+```
+
+### 8.4 语义匹配实现
+
+```python
+# finance_query/semantic_matcher.py
+
+from typing import Optional, List, Dict
+from difflib import SequenceMatcher
+
+class SemanticMatcher:
+    """语义匹配器"""
+
+    def __init__(self, dictionary: dict):
+        self.metrics = dictionary.get("metrics", [])
+        self._build_index()
+
+    def _build_index(self):
+        """构建同义词索引"""
+        self.synonym_index = {}
+        for metric in self.metrics:
+            standard_name = metric["standard_name"]
+            # 标准名称
+            self.synonym_index[standard_name.lower()] = standard_name
+            # 显示名称
+            self.synonym_index[metric["display_name"].lower()] = standard_name
+            # 同义词
+            for syn in metric.get("synonyms", []):
+                self.synonym_index[syn.lower()] = standard_name
+
+    def match(self, keyword: str, threshold: float = 0.8) -> Optional[str]:
+        """
+        匹配关键词到标准指标名
+
+        Args:
+            keyword: 用户输入的关键词
+            threshold: 模糊匹配阈值
+
+        Returns:
+            匹配到的 standard_name，未匹配返回 None
+        """
+        keyword_lower = keyword.lower()
+
+        # 1. 精确匹配
+        if keyword_lower in self.synonym_index:
+            return self.synonym_index[keyword_lower]
+
+        # 2. 模糊匹配
+        best_match = None
+        best_score = 0
+
+        for syn, standard_name in self.synonym_index.items():
+            score = SequenceMatcher(None, keyword_lower, syn).ratio()
+            if score > best_score and score >= threshold:
+                best_score = score
+                best_match = standard_name
+
+        return best_match
+
+    def suggest_similar(self, keyword: str, limit: int = 5) -> List[str]:
+        """
+        推荐相似的指标
+
+        Args:
+            keyword: 用户输入的关键词
+            limit: 返回数量限制
+
+        Returns:
+            相似指标列表（显示名称）
+        """
+        suggestions = []
+        keyword_lower = keyword.lower()
+
+        for metric in self.metrics:
+            # 计算与显示名称的相似度
+            score = SequenceMatcher(
+                None,
+                keyword_lower,
+                metric["display_name"].lower()
+            ).ratio()
+
+            if score > 0.5:  # 宽松阈值
+                suggestions.append({
+                    "name": metric["display_name"],
+                    "score": score
+                })
+
+        # 按相似度排序
+        suggestions.sort(key=lambda x: x["score"], reverse=True)
+        return [s["name"] for s in suggestions[:limit]]
+```
+
+### 8.5 输出格式化实现
+
+```python
+# finance_query/formatter.py
+
+from datetime import datetime
+from typing import Dict, List
+
+class FinanceFormatter:
+    """财务数据格式化器"""
+
+    @staticmethod
+    def format_result(data: dict) -> str:
+        """
+        格式化查询结果为易读报告
+
+        Args:
+            data: 查询工具返回的数据
+
+        Returns:
+            格式化的文本报告
+        """
+        lines = []
+        lines.append("📊 财务指标查询结果")
+        lines.append("")
+        lines.append(f"**指标**：{data.get('metric_name')}（{data.get('metric')}）")
+        lines.append(f"**单位**：{data.get('unit')}")
+        lines.append(f"**机构**：{data.get('branch_id')}")
+        lines.append("")
+
+        # 数据表格
+        rows = data.get("data", [])
+        if rows:
+            lines.append("| 时期 | 数值 |")
+            lines.append("|------|------|")
+            for row in rows:
+                period = row.get("period", "-")
+                value = row.get("value", 0)
+                # 格式化数值
+                if isinstance(value, (int, float)):
+                    value_str = f"{value:,.2f}"
+                else:
+                    value_str = str(value)
+                lines.append(f"| {period} | {value_str} |")
+        else:
+            lines.append("*暂无数据*")
+
+        lines.append("")
+        lines.append(f"*查询时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_no_match(keyword: str, available_metrics: List[Dict]) -> str:
+        """
+        格式化无法匹配的提示信息
+
+        Args:
+            keyword: 用户输入的关键词
+            available_metrics: 可用指标列表
+
+        Returns:
+            友好的提示信息
+        """
+        lines = []
+        lines.append(f"❌ 无法识别的指标：\"{keyword}\"")
+        lines.append("")
+        lines.append("目前支持的财务指标包括：")
+        lines.append("")
+
+        # 按分类分组
+        categories = {}
+        for metric in available_metrics:
+            cat = metric.get("category", "其他")
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append(metric)
+
+        category_icons = {
+            "盈利能力": "📈",
+            "规模指标": "📊",
+            "风险指标": "⚠️",
+            "其他": "📋"
+        }
+
+        for cat, metrics in categories.items():
+            icon = category_icons.get(cat, "📋")
+            lines.append(f"{icon} **{cat}**：")
+            for m in metrics:
+                syns = "、".join(m.get("synonyms", [])[:3])
+                lines.append(f"  • {m['display_name']}（{syns}）")
+            lines.append("")
+
+        lines.append("您可以换个说法，例如：\"去年的净利润是多少？\"")
+
+        return "\n".join(lines)
+```
+
+### 8.6 Skill 与 MCP 工具的关系
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Skill 与 MCP 工具分层                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ Skill 层（业务编排）                                                 │   │
+│  │                                                                     │   │
+│  │  finance-query Skill                                                │   │
+│  │  • 接收用户自然语言输入                                              │   │
+│  │  • 调用 MCP 工具获取字典和数据                                       │   │
+│  │  • 本地语义匹配和结果格式化                                          │   │
+│  │  • 统一的错误处理和用户引导                                          │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                      │
+│                                      │ 调用                                 │
+│                                      ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ MCP 工具层（原子能力）                                               │   │
+│  │                                                                     │   │
+│  │  get_finance_dictionary()   query_financial_metrics()              │   │
+│  │  • 获取指标字典              • 执行参数化查询                        │   │
+│  │  • 纯数据返回                • RLS 安全过滤                          │   │
+│  │  • 不含业务逻辑              • 不含业务逻辑                          │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  分层原则：                                                                  │
+│  • MCP 工具提供原子能力，保持简单、可复用                                     │
+│  • Skill 封装业务流程，固化 SOP，处理用户体验                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.7 Skill 开发检查清单
+
+| # | 检查项 | 说明 |
+|---|--------|------|
+| 1 | SKILL.md 文档完整 | 包含功能描述、使用场景、执行流程 |
+| 2 | 语义匹配准确率 > 95% | 测试常见同义词匹配 |
+| 3 | 异常提示友好 | 无法匹配时提供可用指标列表 |
+| 4 | 输出格式规范 | 表格清晰、单位明确 |
+| 5 | 跨平台兼容 | Windows/Linux 均可运行 |
+| 6 | 单元测试覆盖 | 测试语义匹配和格式化逻辑 |
+
+---
+
+## 9. 项目分阶段演进路线
+
+### 9.1 演进路线图
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -887,7 +1314,7 @@ async def execute_finance_query(
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 8.2 各阶段里程碑
+### 9.2 各阶段里程碑
 
 | 阶段 | 里程碑 | 验收标准 |
 |------|--------|----------|
@@ -897,9 +1324,9 @@ async def execute_finance_query(
 
 ---
 
-## 9. 实施检查清单
+## 10. 实施检查清单
 
-### 9.1 技术层面
+### 10.1 技术层面
 
 | # | 检查项 | 状态 | 负责人 |
 |---|--------|------|--------|
@@ -913,7 +1340,7 @@ async def execute_finance_query(
 | 8 | 数据库只读账号配置 | 📝 待配置 | DBA |
 | 9 | MCP Remote 工具定义 | 📝 待开发 | 后端 |
 
-### 9.2 业务层面
+### 10.2 业务层面
 
 | # | 检查项 | 状态 | 负责人 |
 |---|--------|------|--------|
@@ -923,7 +1350,7 @@ async def execute_finance_query(
 | 4 | 机构代码与 user_id 映射 | 📝 待确认 | 业务 |
 | 5 | 指标计算公式确认 | 📝 待确认 | 业务 |
 
-### 9.3 合规层面
+### 10.3 合规层面
 
 | # | 检查项 | 状态 | 负责人 |
 |---|--------|------|--------|
@@ -931,11 +1358,21 @@ async def execute_finance_query(
 | 2 | 数据访问权限确认 | 📝 待确认 | 合规 |
 | 3 | 只读账号权限审批 | 📝 待审批 | 安全 |
 
+### 10.4 Skill 开发层面
+
+| # | 检查项 | 状态 | 负责人 |
+|---|--------|------|--------|
+| 1 | finance-query Skill 目录结构 | 📝 待开发 | 开发 |
+| 2 | 语义匹配器实现 | 📝 待开发 | 开发 |
+| 3 | 输出格式化器实现 | 📝 待开发 | 开发 |
+| 4 | 异常处理逻辑 | 📝 待开发 | 开发 |
+| 5 | 单元测试编写 | 📝 待开发 | 开发 |
+
 ---
 
-## 10. 下一步行动指南
+## 11. 下一步行动指南
 
-### 10.1 优先级排序
+### 11.1 优先级排序
 
 ```
 P0（阻塞项）：
@@ -945,7 +1382,8 @@ P0（阻塞项）：
 P1（核心开发）：
 ├── 实现 get_finance_dictionary 工具
 ├── 实现 query_financial_metrics 工具
-└── Backend RLS 行级安全实现
+├── Backend RLS 行级安全实现
+└── 开发 finance-query Skill（固化 SOP）
 
 P2（增强功能）：
 ├── 审计日志中间件
@@ -953,7 +1391,7 @@ P2（增强功能）：
 └── 性能监控（查询超时）
 ```
 
-### 10.2 指标清单模板
+### 11.2 指标清单模板
 
 为加快进度，请业务专家按以下模板提供指标清单：
 
@@ -963,7 +1401,7 @@ P2（增强功能）：
 | NPL_RATIO | 不良贷款率 | 风险指标 | % | 不良率、NPL | 不良贷款占比 | 不良贷款/贷款总额 |
 | ... | ... | ... | ... | ... | ... | ... |
 
-### 10.3 准备就绪后
+### 11.3 准备就绪后
 
 准备好指标清单后，可立即开始：
 
@@ -971,7 +1409,8 @@ P2（增强功能）：
 2. **实现字典端点** - 静态返回，无需数据库
 3. **实现查询端点** - 参数化查询 + RLS
 4. **更新 MCP Remote** - 添加工具定义
-5. **端到端测试** - OpenClaw 调试验证
+5. **开发 finance-query Skill** - 固化查询 SOP
+6. **端到端测试** - Claude Code 调试验证
 
 ---
 
