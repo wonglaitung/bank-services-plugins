@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-项目初始化完成，包含以下功能模块：
+项目包含自定义 Skills 和 MCP 安全认证原型两大模块。
 
 ### 已完成
 
@@ -18,15 +18,24 @@
    - 修复 Isolation Forest lookback_days=0 bug
    - 重构 SKILL.md 文档结构
 
-3. **OpenSpec 工作流系统** (2026-04-11)
-   - spec-driven schema
-   - 四个核心命令：propose、apply、archive、explore
-
-4. **跨平台路径规范化** (2026-04-12)
+3. **跨平台路径规范化** (2026-04-12)
    - 为 anomaly-detector 和 excel-auto-fill 添加 `path_utils.py` 模块
    - 支持混合路径格式（Unix `~/` + Windows `\`）
    - 自动处理波浪号扩展和反斜杠转换
    - CLI 脚本集成路径规范化处理
+
+4. **MCP 安全认证原型** (2026-05-25)
+   - Sidecar 模式架构实现
+   - Access Token + Refresh Token 双 Token 机制
+   - Token 自动刷新和吊销支持
+   - IDOR 防护（工具不接受 user_id 参数）
+   - 管理员权限工具（list_all_users）
+
+5. **MCP 工具描述最佳实践文档** (2026-05-26)
+   - v1.1.0 版本
+   - 包含术语规范、命名规范、工具模式库
+   - 大宽表/数据仓库场景指南
+   - 自动化验证脚本
 
 ### 进行中
 
@@ -39,6 +48,23 @@
 ---
 
 ## 更新日志
+
+### 2026-05-26
+- 新增 MCP 工具描述最佳实践文档 (v1.1.0)：
+  - 术语规范、工具复杂度分类、命名规范
+  - 常见工具模式库、性能和调用限制
+  - 自动化验证脚本
+- 重写 prototype/mcp_remote/main.py 工具描述
+- 更新 CLAUDE.md 添加 MCP 原型架构说明
+- 同步原型设计到安全方案文档
+
+### 2026-05-25
+- 实现 MCP 安全认证原型：
+  - 本地代理（local_proxy）：Token 自动刷新
+  - 远端 MCP 服务（mcp_remote）：Token 解密验证
+  - 后台 API（backend_api）：业务逻辑和权限验证
+- 实现 list_all_users 管理员查询工具
+- 职责分离原则：mcp_remote 只传 user_id，业务逻辑由 backend_api 负责
 
 ### 2026-04-14
 - 完成从 iFlow CLI 到 Claude Code 的迁移：
