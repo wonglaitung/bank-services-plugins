@@ -50,6 +50,33 @@ mcp = FastMCP("FinanceService")
 # FastAPI 应用
 app = FastAPI(title="MCP 远端服务")
 
+
+# ==================== 安全调用装饰器 ====================
+
+def secure_api_call(func):
+    """
+    安全 API 调用装饰器
+
+    统一处理 API 调用异常，确保返回格式化的错误信息。
+    防止原始异常信息暴露给大模型，避免干扰模型判断。
+    """
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except httpx.HTTPStatusError as e:
+            logger.error(f"后端接口调用失败: {e.response.status_code}")
+            return {"error": f"后端接口调用失败: HTTP {e.response.status_code}"}
+        except httpx.ConnectError as e:
+            logger.error(f"无法连接后端服务: {e}")
+            return {"error": "无法连接后端服务，请检查服务状态"}
+        except httpx.TimeoutException as e:
+            logger.error(f"后端服务响应超时: {e}")
+            return {"error": "后端服务响应超时"}
+        except Exception as e:
+            logger.error(f"内部处理错误: {e}")
+            return {"error": "内部处理错误，请联系管理员"}
+    return wrapper
+
 # 配置
 BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8000")
 
@@ -345,12 +372,14 @@ async def verify_request(request: Request) -> str:
 # ==================== MCP Tools 定义 ====================
 
 @mcp.tool()
+@secure_api_call
 async def get_my_info() -> dict:
     """
-    获取当前用户的信息
+    获取当前用户的完整信息。
 
+    当用户询问"我的信息"、"我是谁"、"我的资料"或"个人信息"时调用此工具。
     返回当前登录用户的详细信息，包括姓名、部门、角色等。
-    不接受任何用户标识参数，身份从认证上下文获取。
+    此工具仅能查询当前已认证用户的信息，不接受任何用户标识参数。
     """
     user_id = current_user_id.get()
 
@@ -361,40 +390,60 @@ async def get_my_info() -> dict:
 
 
 @mcp.tool()
+@secure_api_call
 async def get_my_department() -> dict:
     """
-    获取当前用户所在部门的信息
+    获取当前用户所在部门的信息。
 
-    返回当前用户所属部门的基本信息。
+    当用户询问"我的部门"、"我在哪个部门"或"部门信息"时调用此工具。
+    返回当前用户的部门名称及相关信息。
+    此工具仅返回部门相关数据，不包含余额等敏感财务信息。
     """
     user_id = current_user_id.get()
 
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
         response.raise_for_status()
-        return response.json()
+        user_data = response.json()
+        # 过滤只返回部门相关信息
+        return {
+            "user_id": user_data.get("user_id"),
+            "name": user_data.get("name"),
+            "department": user_data.get("department")
+        }
 
 
 @mcp.tool()
+@secure_api_call
 async def get_my_balance() -> dict:
     """
-    获取当前用户的账户余额
+    获取当前用户的账户余额。
 
-    返回当前用户的财务余额信息。
+    当用户询问"我的余额"、"我还有多少钱"、"账户余额"或"财务状况"时调用此工具。
+    返回当前用户的实时账户余额信息。
+    此工具仅能查询当前已认证用户的余额，严禁用于尝试获取他人数据。
     """
     user_id = current_user_id.get()
 
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
         response.raise_for_status()
-        return response.json()
+        user_data = response.json()
+        # 过滤只返回余额相关信息
+        return {
+            "user_id": user_data.get("user_id"),
+            "name": user_data.get("name"),
+            "balance": user_data.get("balance", 0)
+        }
 
 
 @mcp.tool()
+@secure_api_call
 async def check_my_permission() -> dict:
     """
-    检查当前用户的权限
+    检查当前用户的权限。
 
+    当用户询问"我的权限"、"我能做什么"或"角色信息"时调用此工具。
     返回当前用户的角色和基本权限信息。
     """
     user_id = current_user_id.get()
@@ -402,21 +451,26 @@ async def check_my_permission() -> dict:
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
         response.raise_for_status()
-        return response.json()
+        user_data = response.json()
+        # 过滤只返回权限相关信息
+        return {
+            "user_id": user_data.get("user_id"),
+            "name": user_data.get("name"),
+            "department": user_data.get("department"),
+            "role": user_data.get("role")
+        }
 
 
 @mcp.tool()
+@secure_api_call
 async def list_all_users() -> dict:
     """
-    管理员查询所有用户信息（不含金额）
+    【管理员权限工具】查询所有用户信息（不含金额）。
 
-    只有 admin 角色的用户才能调用此工具。
-    返回所有用户的基本信息列表，不包括余额数据。
-    权限检查由后台 API 执行。
-
-    Returns:
-        用户列表，包含 total 和 users 字段
-        非管理员返回错误信息
+    仅限 admin 角色的用户才能调用此工具。
+    当管理员需要查看"所有用户"、"用户列表"或"有多少用户"时调用。
+    返回所有用户的基本信息列表，包括姓名、部门、角色，不包含余额数据。
+    权限检查由后台 API 执行，非管理员调用将返回 403 错误。
     """
     user_id = current_user_id.get()
 

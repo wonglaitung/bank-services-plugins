@@ -1076,13 +1076,16 @@ TOKEN_KEY=6Hd+908eMNP0T/4CmFKxdpkHI3HaMrINtej6VCcpx7Y= python prototype/mcp_remo
 # mcp_remote/main.py
 
 @mcp.tool()
+@secure_api_call
 async def new_tool_name(param1: str, param2: int = 10) -> dict:
     """
-    工具描述（会显示给 Claude）
+    工具功能概述（一句话）。
 
-    参数:
-        param1: 参数1说明
-        param2: 参数2说明
+    当用户询问"<关键词1>"、"<关键词2>"时调用此工具。
+
+    返回内容说明（列出返回字段）。
+
+    安全约束说明（如不接受 user_id 参数）。
     """
     user_id = current_user_id.get()  # 从上下文获取用户编号
 
@@ -1098,12 +1101,27 @@ async def new_tool_name(param1: str, param2: int = 10) -> dict:
 - 业务逻辑（权限验证、数据验证等）由 backend_api 负责
 - mcp_remote 直接透传 backend_api 的响应结果
 
+**工具描述规范：**
+- 遵循 [MCP 工具描述最佳实践](mcp_tool_description_best_practices.md)
+- 包含触发场景关键词，提升意图识别准确率
+- 过滤返回数据，避免冗余字段干扰模型判断
+- 标注权限要求，帮助模型自我约束
+
 **示例：管理员查询所有用户**
 
 ```python
 @mcp.tool()
+@secure_api_call
 async def list_all_users() -> dict:
-    """管理员查询所有用户信息（不含金额）"""
+    """
+    【管理员权限工具】查询所有用户信息（不含金额）。
+
+    仅限 admin 角色的用户才能调用此工具。
+    当管理员需要查看"所有用户"、"用户列表"或"有多少用户"时调用。
+
+    返回所有用户的基本信息列表，不包含余额数据。
+    非管理员调用将返回 403 错误。
+    """
     user_id = current_user_id.get()
 
     async with httpx.AsyncClient() as client:

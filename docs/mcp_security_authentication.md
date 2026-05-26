@@ -1678,6 +1678,12 @@ else:
 
 **关键原则**：工具函数名以 `my_` 开头，不接受 `user_id` 参数，从 `ContextVar` 获取当前用户身份。
 
+**工具描述规范**：为提升大模型意图识别准确性，工具描述需遵循 [MCP 工具描述最佳实践](mcp_tool_description_best_practices.md)，包括：
+- 明确触发场景关键词
+- 过滤返回数据，避免冗余
+- 标注权限要求（如 `【管理员权限工具】`）
+- 说明参数约束和安全边界
+
 ---
 
 ## 11. 安全特性总结
@@ -2211,3 +2217,4 @@ def get_current_employee_id() -> str:
 - [MCP (Model Context Protocol) 官方文档](https://modelcontextprotocol.io/)
 - [cryptography 库文档](https://cryptography.io/)
 - [OWASP IDOR 防护指南](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References)
+- [MCP 工具描述最佳实践](mcp_tool_description_best_practices.md) - 提升大模型意图识别准确性
