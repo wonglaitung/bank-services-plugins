@@ -3,7 +3,7 @@
     "user_id": "000000001",
     "name": "张三",
     "department": "财务部",
-    "role": "viewer",
+    "role": "admin",
     "balance": 125000.00
   },
   "000000002": {

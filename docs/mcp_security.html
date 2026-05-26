@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP 安全认证原型 - Sidecar 模式交互式演示</title>
+    <style>
+        :root {
+            --bg-dark: #0b0f19;
+            --bg-panel: #111827;
+            --bg-terminal: #000000;
+            --border: #374151;
+            --primary: #3b82f6;
+            --secondary: #10b981;
+            --accent: #f59e0b;
+            --danger: #ef4444;
+            --purple: #8b5cf6;
+            --text-main: #e5e7eb;
+            --text-sub: #9ca3af;
+            --font-mono: 'Courier New', Courier, monospace;
+            --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        header {
+            background: var(--bg-panel);
+            padding: 12px 24px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        header h1 { font-size: 18px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+        header h1 span { color: var(--primary); }
+        .badge { font-size: 11px; padding: 3px 8px; border-radius: 4px; background: rgba(59, 130, 246, 0.15); color: var(--primary); font-family: var(--font-mono); border: 1px solid rgba(59, 130, 246, 0.3); }
+
+        .main-container { flex: 1; display: flex; overflow: hidden; }
+
+        .diagram-panel {
+            flex: 1;
+            position: relative;
+            background: radial-gradient(circle at 20% 30%, #1e293b 0%, transparent 50%), var(--bg-dark);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+        }
+
+        .zone-divider {
+            position: absolute; top: 0; bottom: 0; left: 52%;
+            width: 2px; background: linear-gradient(to bottom, transparent 5%, var(--border) 15%, var(--border) 85%, transparent 95%);
+            opacity: 0.5; pointer-events: none;
+        }
+        .zone-divider::after {
+            content: 'SECURITY BOUNDARY (HTTPS)';
+            position: absolute; top: 12px; left: -75px; width: 150px; text-align: center;
+            font-size: 10px; color: var(--text-sub); background: var(--bg-dark); padding: 2px 4px;
+            letter-spacing: 1px; border: 1px dashed var(--border); border-radius: 4px;
+        }
+
+        .zone-label {
+            position: absolute; font-family: var(--font-mono); font-size: 12px; color: var(--text-sub);
+            padding: 6px 10px; border-radius: 4px; background: rgba(17, 24, 39, 0.6); border: 1px dashed var(--border);
+            pointer-events: none;
+        }
+        .zone-local { top: 15px; left: 20px; }
+        .zone-server { bottom: 15px; right: 20px; border-color: var(--secondary); color: var(--secondary); }
+
+        #arch-svg { width: 100%; height: 100%; flex: 1; }
+
+        .node-box {
+            fill: var(--bg-panel); stroke: var(--border); stroke-width: 2; transition: all 0.3s ease;
+        }
+        .node-box.active { stroke-width: 3; filter: drop-shadow(0 0 15px currentColor); }
+        .node-text { fill: var(--text-main); font-family: var(--font-sans); font-size: 14px; font-weight: 600; pointer-events: none; }
+        .node-sub { fill: var(--text-sub); font-family: var(--font-mono); font-size: 10px; pointer-events: none; }
+        
+        .conn-line { stroke: var(--border); stroke-width: 2; fill: none; transition: stroke 0.3s; marker-end: url(#arrow); }
+        .conn-line.flow-active { stroke-width: 3; stroke-dasharray: 8, 4; animation: dash 0.5s linear infinite; }
+        
+        .packet { r: 5; opacity: 0; transition: opacity 0.2s; filter: drop-shadow(0 0 5px currentColor); }
+        .packet.active { opacity: 1; }
+
+        .artifact-box {
+            fill: var(--bg-panel); stroke-dasharray: 4, 3; stroke-width: 1.5; transition: all 0.3s ease; opacity: 0.8;
+        }
+        .artifact-box.active { stroke-width: 2.5; opacity: 1; filter: drop-shadow(0 0 8px currentColor); }
+        .artifact-text { font-family: var(--font-mono); font-size: 9px; pointer-events: none; }
+        .callout-line { stroke-width: 1; stroke-dasharray: 3, 3; fill: none; opacity: 0.5; }
+
+        @keyframes dash { to { stroke-dashoffset: -12; } }
+
+        .control-panel { width: 420px; background: var(--bg-panel); display: flex; flex-direction: column; border-left: 1px solid var(--border); }
+
+        .tabs { display: flex; border-bottom: 1px solid var(--border); background: #0f1522; }
+        .tab-btn { flex: 1; padding: 12px 0; background: none; border: none; color: var(--text-sub); font-family: var(--font-sans); font-size: 13px; cursor: pointer; position: relative; }
+        .tab-btn:hover { color: var(--text-main); }
+        .tab-btn.active { color: var(--primary); }
+        .tab-btn.active::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 2px; background: var(--primary); }
+
+        .tab-content { flex: 1; overflow-y: auto; padding: 16px; }
+        .tab-pane { display: none; }
+        .tab-pane.active { display: block; }
+
+        .section-title { font-size: 12px; color: var(--text-sub); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; padding-top: 10px; border-top: 1px solid var(--border); }
+        .section-title:first-child { border-top: none; padding-top: 0; }
+
+        .token-status { background: var(--bg-dark); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 16px; }
+        .token-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .token-label { font-size: 12px; color: var(--text-sub); font-family: var(--font-mono); }
+        .token-value { font-size: 12px; color: var(--secondary); font-family: var(--font-mono); font-weight: bold; }
+        .token-value.expired { color: var(--danger); }
+        
+        .progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+        .progress-fill { height: 100%; background: var(--secondary); width: 100%; transition: width 0.3s ease, background 0.3s; }
+        .progress-fill.warning { background: var(--accent); }
+        .progress-fill.danger { background: var(--danger); }
+
+        .controls { display: flex; flex-direction: column; gap: 10px; }
+        select, button {
+            background: var(--bg-dark); border: 1px solid var(--border); color: var(--text-main); padding: 10px; border-radius: 6px;
+            font-family: var(--font-mono); font-size: 13px; cursor: pointer; transition: all 0.2s; width: 100%;
+        }
+        select:hover, button:hover:not(:disabled) { border-color: var(--primary); background: rgba(59, 130, 246, 0.1); }
+        button.primary { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: bold; }
+        button.primary:hover:not(:disabled) { background: #2563eb; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        .toggle-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-sub); padding: 4px 0; }
+        .toggle-switch { position: relative; width: 36px; height: 18px; background: var(--border); border-radius: 9px; cursor: pointer; transition: background 0.2s; }
+        .toggle-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; background: var(--text-sub); border-radius: 50%; transition: all 0.2s; }
+        .toggle-switch.active { background: var(--secondary); }
+        .toggle-switch.active::after { transform: translateX(18px); background: #fff; }
+        .toggle-switch.danger.active { background: var(--danger); }
+        .toggle-switch.danger.active::after { background: #fff; }
+
+        .terminal { height: 400px; background: var(--bg-terminal); padding: 12px; font-family: var(--font-mono); font-size: 11px; overflow-y: auto; border-top: 1px solid var(--border); }
+        .log-entry { margin-bottom: 5px; line-height: 1.5; word-break: break-word; }
+        .log-ts { color: var(--text-sub); opacity: 0.5; margin-right: 6px; user-select: none; }
+        .log-src { padding: 2px 5px; border-radius: 3px; margin-right: 6px; font-size: 10px; font-weight: bold; display: inline-block; min-width: 40px; text-align: center; }
+        .log-src.claude { background: var(--purple); color: #fff; }
+        .log-src.proxy { background: var(--primary); color: #fff; }
+        .log-src.remote { background: var(--secondary); color: #000; }
+        .log-src.auth { background: var(--accent); color: #000; }
+        .log-src.backend { background: var(--danger); color: #000; }
+        .log-msg { color: var(--text-main); }
+        .log-msg.success { color: var(--secondary); }
+        .log-msg.error { color: var(--danger); }
+        .log-msg.info { color: var(--text-sub); }
+        .log-msg.warn { color: var(--accent); }
+
+        .info-card { background: rgba(59, 130, 246, 0.05); border: 1px solid rgba(59, 130, 246, 0.2); border-radius: 6px; padding: 12px; margin-bottom: 12px; font-size: 12px; line-height: 1.6; }
+        .info-card ul { padding-left: 16px; margin-top: 6px; }
+        .info-card li { margin-bottom: 4px; }
+
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1><span>◆</span> MCP 安全认证原型 <span style="color:var(--text-sub); font-weight:normal; font-size:14px;">Sidecar 模式</span></h1>
+    <div class="badge">v1.0.6 | 零信任架构</div>
+</header>
+
+<div class="main-container">
+    <div class="diagram-panel">
+        <div class="zone-divider"></div>
+        <div class="zone-label zone-local">👤 用户本地机器 (User Machine)</div>
+        <div class="zone-label zone-server">🏢 公司服务器 (Company Server)</div>
+
+        <svg id="arch-svg" viewBox="0 0 800 450">
+            <defs>
+                <marker id="arrow" markerWidth="6" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#4b5563" /></marker>
+                <marker id="arrow-active" markerWidth="6" markerHeight="6" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3b82f6" /></marker>
+            </defs>
+            
+            <path id="path-c2p" class="conn-line" d="M 160 120 L 340 120" />
+            <path id="path-p2r" class="conn-line" d="M 500 120 L 660 100" />
+            <path id="path-r2b" class="conn-line" d="M 730 140 L 730 320" />
+            
+            <circle id="pkt-c2p" class="packet" fill="#8b5cf6" />
+            <circle id="pkt-p2r" class="packet" fill="#3b82f6" />
+            <circle id="pkt-r2b" class="packet" fill="#10b981" />
+            <circle id="pkt-b2r" class="packet" fill="#f59e0b" />
+            <circle id="pkt-r2p" class="packet" fill="#10b981" />
+            <circle id="pkt-p2c" class="packet" fill="#8b5cf6" />
+
+            <g transform="translate(40, 80)">
+                <rect class="node-box" width="120" height="80" rx="8" style="stroke: var(--purple);" />
+                <text class="node-text" x="60" y="35" text-anchor="middle" style="fill: var(--purple);">Claude Code</text>
+                <text class="node-sub" x="60" y="52" text-anchor="middle">MCP Client (Stdio)</text>
+            </g>
+
+            <g transform="translate(340, 80)">
+                <rect class="node-box" width="160" height="80" rx="8" style="stroke: var(--primary);" />
+                <text class="node-text" x="80" y="35" text-anchor="middle" style="fill: var(--primary);">Local Proxy</text>
+                <text class="node-sub" x="80" y="52" text-anchor="middle">TokenRefreshManager</text>
+                <text class="node-sub" x="80" y="68" text-anchor="middle" style="fill: var(--text-sub);">透传协议 / 注入Header</text>
+            </g>
+
+            <g transform="translate(660, 60)">
+                <rect class="node-box" width="140" height="80" rx="8" style="stroke: var(--secondary);" />
+                <text class="node-text" x="70" y="35" text-anchor="middle" style="fill: var(--secondary);">Remote MCP</text>
+                <text class="node-sub" x="70" y="52" text-anchor="middle">/auth/refresh & /mcp</text>
+                <text class="node-sub" x="70" y="68" text-anchor="middle" style="fill: var(--text-sub);">解密Token / 设上下文</text>
+            </g>
+
+            <g transform="translate(660, 300)">
+                <rect class="node-box" width="140" height="80" rx="8" style="stroke: var(--danger);" />
+                <text class="node-text" x="70" y="35" text-anchor="middle" style="fill: var(--danger);">Backend API</text>
+                <text class="node-sub" x="70" y="52" text-anchor="middle">FastAPI / DB</text>
+                <text class="node-sub" x="70" y="68" text-anchor="middle" style="fill: var(--text-sub);">/api/user/{user_id}</text>
+            </g>
+
+            <g id="box-refresh-token">
+                <rect class="artifact-box" x="140" y="35" width="190" height="28" rx="4" style="stroke: var(--accent); color: var(--accent);" />
+                <text class="artifact-text" x="235" y="52" text-anchor="middle" fill="var(--accent)">📁 .mcp.json (MCP_REFRESH_TOKEN)</text>
+            </g>
+            <path class="callout-line" d="M 235 63 L 380 100" style="stroke: var(--accent);" />
+
+            <g id="box-access-cache">
+                <rect class="artifact-box" x="350" y="175" width="140" height="26" rx="4" style="stroke: var(--primary); color: var(--primary);" />
+                <text class="artifact-text" x="420" y="192" text-anchor="middle" fill="var(--primary)">💾 Memory Cache (Access Token)</text>
+            </g>
+            <path class="callout-line" d="M 420 175 L 420 160" style="stroke: var(--primary);" />
+
+            <g id="box-token-key">
+                <rect class="artifact-box" x="660" y="15" width="160" height="28" rx="4" style="stroke: var(--danger); color: var(--danger);" />
+                <text class="artifact-text" x="740" y="32" text-anchor="middle" fill="var(--danger)">🔑 TOKEN_KEY (AES-256) [仅服务端]</text>
+            </g>
+            <path class="callout-line" d="M 740 43 L 730 60" style="stroke: var(--danger);" />
+        </svg>
+    </div>
+
+    <div class="control-panel">
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="flow">📡 请求流转</button>
+            <button class="tab-btn" data-tab="token">🔐 Token 机制</button>
+            <button class="tab-btn" data-tab="arch">🏗️ 架构说明</button>
+        </div>
+
+        <div class="tab-content">
+            <div class="tab-pane active" id="tab-flow">
+                <div class="section-title">🎬 交互模拟</div>
+                <div class="controls">
+                    <select id="action-select">
+                        <option value="call">POST /tools/call (查询我的信息)</option>
+                        <option value="list">GET /tools/list (发现工具)</option>
+                    </select>
+                    <button class="primary" id="btn-run" onclick="simulation.run()">▶ 发起请求</button>
+                    
+                    <div class="toggle-row">
+                        <span>模拟 Access Token 已过期 (触发刷新)</span>
+                        <div class="toggle-switch active" id="toggle-expired" onclick="this.classList.toggle('active')"></div>
+                    </div>
+                    <div class="toggle-row">
+                        <span>模拟无效/篡改 Token</span>
+                        <div class="toggle-switch danger" id="toggle-invalid" onclick="this.classList.toggle('active')"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-pane" id="tab-token">
+                <div class="section-title">⏱️ Token 生命周期</div>
+                <div class="token-status" id="token-card">
+                    <div class="token-row"><span class="token-label">Refresh Token (7d)</span><span class="token-value">Active</span></div>
+                    <div class="token-row" style="margin-top:12px;"><span class="token-label">Access Token (15m)</span><span class="token-value" id="at-label">Active</span></div>
+                    <div class="progress-bar"><div class="progress-fill" id="at-progress" style="width: 92%;"></div></div>
+                    <div style="margin-top: 12px; display: flex; gap: 8px;">
+                        <button style="font-size:11px; padding:6px;" onclick="simulation.expireToken()">⚠️ 强制过期</button>
+                        <button style="font-size:11px; padding:6px;" onclick="simulation.refreshToken()">🔄 手动刷新</button>
+                    </div>
+                </div>
+                <div class="info-card">
+                    <strong>存储与安全边界:</strong>
+                    <ul>
+                        <li><code>MCP_REFRESH_TOKEN</code> 持久化存储在 <code>.mcp.json</code> 中。</li>
+                        <li><code>Access Token</code> 仅驻留在 Proxy 内存中，过期前自动刷新。</li>
+                        <li><code>TOKEN_KEY</code> 仅存在于远端服务器，本地不解密。</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="tab-pane" id="tab-arch">
+                <div class="info-card">
+                    <strong>为什么需要 Sidecar 模式?</strong>
+                    <ul>
+                        <li><strong>安全隔离:</strong> 模型无法修改 user_id 或伪造 Token。</li>
+                        <li><strong>透明转发:</strong> 代理不解析业务 JSON-RPC，仅注入 Auth Header。</li>
+                        <li><strong>灵活扩展:</strong> 新增 Tool 只需改远端服务，代理零修改。</li>
+                        <li><strong>分层审计:</strong> 代理记录网络调用，远端记录解密与业务日志。</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="terminal" id="terminal">
+            <div class="log-entry"><span class="log-ts">[SYSTEM]</span> MCP 安全认证原型已就绪。</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+        });
+    });
+
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const terminal = document.getElementById('terminal');
+    
+    function addLog(src, msg, type = 'info') {
+        const ts = new Date().toLocaleTimeString('zh-CN', {hour12: false});
+        const div = document.createElement('div');
+        div.className = 'log-entry';
+        div.innerHTML = `<span class="log-ts">${ts}</span><span class="log-src ${src}">${src.toUpperCase()}</span><span class="log-msg ${type}">${msg}</span>`;
+        terminal.appendChild(div);
+        terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function movePacket(circleId, pathId, duration, callback) {
+        const circle = document.getElementById(circleId);
+        const path = document.getElementById(pathId);
+        if (!circle || !path) { if(callback) callback(); return; }
+        const len = path.getTotalLength();
+        circle.classList.add('active');
+        let start = null;
+        function step(timestamp) {
+            if (!start) start = timestamp;
+            const progress = (timestamp - start) / duration;
+            if (progress < 1) {
+                const pt = path.getPointAtLength(progress * len);
+                circle.setAttribute('cx', pt.x);
+                circle.setAttribute('cy', pt.y);
+                requestAnimationFrame(step);
+            } else {
+                circle.classList.remove('active');
+                if (callback) callback();
+            }
+        }
+        requestAnimationFrame(step);
+    }
+
+    function animateLine(pathId, duration) {
+        const path = document.getElementById(pathId);
+        if (!path) return;
+        path.classList.add('flow-active');
+        path.setAttribute('marker-end', 'url(#arrow-active)');
+        setTimeout(() => { path.classList.remove('flow-active'); path.setAttribute('marker-end', 'url(#arrow)'); }, duration);
+    }
+
+    function highlightNode(text, active) {
+        document.querySelectorAll('.node-box').forEach(node => {
+            const t = node.parentElement.querySelector('.node-text');
+            if (t && t.textContent.includes(text)) active ? node.classList.add('active') : node.classList.remove('active');
+        });
+    }
+
+    function highlightArtifact(id, active) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const box = el.querySelector('.artifact-box');
+        if (box) active ? box.classList.add('active') : box.classList.remove('active');
+    }
+
+    const state = { atExpiry: 92, atValid: true, isRunning: false };
+
+    const simulation = {
+        async run() {
+            if (state.isRunning) return;
+            state.isRunning = true;
+            document.getElementById('btn-run').disabled = true;
+            
+            const isExpired = document.getElementById('toggle-expired').classList.contains('active');
+            const isInvalid = document.getElementById('toggle-invalid').classList.contains('active');
+            const action = document.getElementById('action-select').value;
+            const isList = action === 'list';
+
+            addLog('SYSTEM', `▶ 发起请求: ${isList ? 'tools/list' : 'tools/call'}`, 'info');
+
+            try {
+                if (isExpired) { state.atValid = false; state.atExpiry = 0; this.updateTokenUI(); }
+
+                // 1. Claude -> Proxy
+                highlightNode('Claude', true);
+                addLog('Claude', `发送 JSON-RPC: ${isList ? 'tools/list' : 'tools/call (get_my_info)'}`);
+                animateLine('path-c2p', 600);
+                await movePacket('pkt-c2p', 'path-c2p', 600);
+                highlightNode('Claude', false);
+
+                // 2. Proxy 检查 & 刷新 Token
+                highlightNode('Proxy', true);
+                highlightArtifact('box-refresh-token', true);
+                addLog('Proxy', '接收请求，检查 Access Token 状态...', 'info');
+                await sleep(400);
+                highlightArtifact('box-refresh-token', false);
+
+                if (!state.atValid) {
+                    addLog('Proxy', '⚠️ Access Token 已过期，启动 Refresh Token 流程...', 'warn');
+                    await sleep(300);
+                    
+                    addLog('Proxy', '构造 POST /auth/refresh {refresh_token: "..."}');
+                    animateLine('path-p2r', 600);
+                    await movePacket('pkt-p2r', 'path-p2r', 600);
+                    highlightNode('Proxy', false);
+
+                    highlightNode('Remote', true);
+                    addLog('Auth', 'Remote 接收 Refresh Token，验证签名与有效期', 'info');
+                    await sleep(500);
+                    addLog('Auth', '✅ 验证通过，生成新 Access Token (有效期15m)', 'success');
+                    await sleep(300);
+
+                    addLog('Remote', '返回 Access Token 给 Proxy');
+                    animateLine('path-p2r', 500);
+                    await movePacket('pkt-r2p', 'path-p2r', 500);
+                    highlightNode('Remote', false);
+
+                    highlightNode('Proxy', true);
+                    highlightArtifact('box-access-cache', true);
+                    addLog('Proxy', '收到新 Access Token，写入内存缓存', 'success');
+                    await sleep(400);
+                    highlightArtifact('box-access-cache', false);
+                    state.atValid = true; state.atExpiry = 100;
+                    this.updateTokenUI();
+                }
+
+                if (isInvalid) { addLog('Proxy', '⚠️ 注入无效 Token (模拟攻击)', 'warn'); }
+                else { addLog('Proxy', '附加 Header: Authorization: Bearer <Access Token>'); }
+                
+                await sleep(300);
+                animateLine('path-p2r', 600);
+                await movePacket('pkt-p2r', 'path-p2r', 600);
+                highlightNode('Proxy', false);
+
+                // 3. Remote 处理
+                highlightNode('Remote', true);
+                if (isInvalid) {
+                    highlightArtifact('box-token-key', true);
+                    addLog('Remote', '🔑 尝试解密... ❌ 签名校验失败 / 格式错误', 'error');
+                    await sleep(500);
+                    highlightArtifact('box-token-key', false);
+                    addLog('Remote', '返回 401 Unauthorized');
+                    await movePacket('pkt-r2p', 'path-p2r', 500);
+                    await movePacket('pkt-p2c', 'path-c2p', 500);
+                    highlightNode('Remote', false);
+                    highlightNode('Claude', true);
+                    addLog('Claude', '请求被拒: 身份验证失败', 'error');
+                    await sleep(400);
+                    highlightNode('Claude', false);
+                    this.finishRun(); return;
+                }
+
+                highlightArtifact('box-token-key', true);
+                addLog('Remote', '🔑 使用 TOKEN_KEY 解密 Token (AES-256-GCM)');
+                await sleep(500);
+                highlightArtifact('box-token-key', false);
+                addLog('Remote', '提取 user_id=000000001, expires_at > now', 'success');
+                addLog('Remote', '设置 ContextVar: current_user_id.set("000000001")', 'info');
+                await sleep(400);
+                addLog('Remote', `执行 Tool: ${isList ? 'list_tools()' : 'get_my_info()'}`, 'info');
+
+                if (!isList) {
+                    addLog('Remote', '调用内部 API: GET /api/user/000000001', 'info');
+                    animateLine('path-r2b', 500);
+                    await movePacket('pkt-r2b', 'path-r2b', 500);
+                    
+                    highlightNode('Backend', true);
+                    await sleep(300);
+                    addLog('Backend', '接收请求: GET /api/user/000000001');
+                    addLog('Backend', '执行业务逻辑: 查询用户 & 权限校验', 'info');
+                    await sleep(500);
+                    addLog('Backend', '返回数据: {name: "张三", dept: "财务部", role: "viewer"}', 'success');
+                    await sleep(300);
+                    highlightNode('Backend', false);
+                    await movePacket('pkt-b2r', 'path-r2b', 400);
+                    addLog('Remote', '接收 Backend 响应，封装为 MCP JSON-RPC Result', 'info');
+                } else {
+                    addLog('Remote', '返回工具定义列表', 'info');
+                }
+
+                // 4. 返回链路
+                animateLine('path-p2r', 500);
+                await movePacket('pkt-r2p', 'path-p2r', 500);
+                highlightNode('Remote', false);
+
+                highlightNode('Proxy', true);
+                addLog('Proxy', '透传 Stdio 返回 Claude');
+                await sleep(200);
+                animateLine('path-c2p', 500);
+                await movePacket('pkt-p2c', 'path-c2p', 500);
+                highlightNode('Proxy', false);
+
+                highlightNode('Claude', true);
+                addLog('Claude', `✅ 成功接收结果。完整链路闭环。`, 'success');
+                await sleep(500);
+                highlightNode('Claude', false);
+
+                state.atExpiry = Math.max(5, state.atExpiry - 8);
+                if (state.atExpiry <= 0) { state.atExpiry = 0; state.atValid = false; }
+                this.updateTokenUI();
+
+            } catch (e) {
+                addLog('SYSTEM', '❌ 模拟出错: ' + e.message, 'error');
+            } finally {
+                this.finishRun();
+            }
+        },
+
+        expireToken() { state.atValid = false; state.atExpiry = 0; this.updateTokenUI(); addLog('SYSTEM', '⚠️ Access Token 强制过期', 'warn'); },
+        refreshToken() { state.atValid = true; state.atExpiry = 100; this.updateTokenUI(); addLog('SYSTEM', '🔄 手动刷新 Access Token', 'success'); },
+        finishRun() { state.isRunning = false; document.getElementById('btn-run').disabled = false; },
+        updateTokenUI() {
+            const l = document.getElementById('at-label'), b = document.getElementById('at-progress'), c = document.getElementById('token-card');
+            l.textContent = state.atValid ? 'Active' : 'Expired';
+            l.className = `token-value ${state.atValid ? '' : 'expired'}`;
+            state.atValid ? c.classList.remove('expired') : c.classList.add('expired');
+            b.style.width = `${state.atExpiry}%`;
+            b.className = 'progress-fill';
+            if (state.atExpiry < 25) b.classList.add('danger');
+            else if (state.atExpiry < 55) b.classList.add('warning');
+        }
+    };
+
+    simulation.updateTokenUI();
+    setTimeout(() => addLog('SYSTEM', '架构初始化完成。安全边界已建立，等待指令。', 'info'), 500);
+</script>
+</body>
+</html>
+
