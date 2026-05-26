@@ -243,152 +243,177 @@ curl -X POST http://localhost:8001/auth/revoke \
 | Token 吊销 | 吊销后使用 Refresh Token | 返回 401 "Token 已被吊销" |
 | IDOR 防护 | 请求他人数据 | 返回当前用户数据 |
 
-## 财务接口测试案例
+## AI Agent 测试案例
 
-### 测试环境准备
+以下是在 Claude Code 等 AI Agent 中输入的自然语言测试案例，用于验证财务接口功能。
 
-```bash
-# 生成 Access Token（用户 000000001，机构 BR001）
-python3 -c "
-import os, json, base64, secrets
-from datetime import datetime, timezone, timedelta
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-TOKEN_KEY = b'prototype-test-key-32-bytes-!!!!'
-now = datetime.now(timezone.utc)
-expires_at = now + timedelta(minutes=15)
-jti = secrets.token_urlsafe(16)
-token_data = {'user_id': '000000001', 'token_type': 'access', 'jti': jti, 'expires_at': expires_at.strftime('%Y-%m-%dT%H:%M:%SZ')}
-aesgcm = AESGCM(TOKEN_KEY)
-nonce = os.urandom(12)
-plaintext = json.dumps(token_data).encode('utf-8')
-ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-print(base64.b64encode(nonce + ciphertext).decode('utf-8'))
-"
+### 案例 1：查询可用指标
+
+**用户输入**：
+```
+有哪些财务指标可以查询？
 ```
 
-### 测试案例 1：获取财务指标字典
+**预期响应**：AI 调用 `get_finance_dictionary` 工具，返回 8 个财务指标列表，包括净利润、不良贷款率、资产总额等，并说明每个指标的同义词和单位。
 
-```bash
-curl -s -X POST http://localhost:8001/mcp \
-  -H "Authorization: Bearer <ACCESS_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "get_finance_dictionary", "arguments": {}}, "id": 1}'
+---
+
+### 案例 2：年度净利润查询
+
+**用户输入**：
+```
+查询去年的净利润
 ```
 
-**预期结果**：返回 8 个财务指标的元数据字典，包含 `metrics` 和 `dimensions` 字段。
-
-### 测试案例 2：查询年度净利润
-
-```bash
-curl -s -X POST http://localhost:8001/mcp \
-  -H "Authorization: Bearer <ACCESS_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "NET_PROFIT", "year": 2025}}, "id": 2}'
+**预期响应**：AI 调用 `query_financial_metrics` 工具（metric=NET_PROFIT, year=2025），返回：
+```
+2025 年净利润为 125,000 万元（BR001 机构）
 ```
 
-**预期结果**：
-```json
-{
-  "metric": "NET_PROFIT",
-  "metric_name": "净利润",
-  "unit": "万元",
-  "branch_id": "BR001",
-  "data": [{"period": "2025", "value": 125000.0}]
-}
+---
+
+### 案例 3：季度数据查询
+
+**用户输入**：
+```
+今年一季度的不良率是多少？
 ```
 
-### 测试案例 3：查询季度净利润
-
-```bash
-curl -s -X POST http://localhost:8001/mcp \
-  -H "Authorization: Bearer <ACCESS_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "NET_PROFIT", "year": 2025, "granularity": "quarterly"}}, "id": 3}'
+**预期响应**：AI 调用 `query_financial_metrics` 工具（metric=NPL_RATIO, year=2025, quarter=1），返回：
+```
+2025 年一季度不良贷款率为 1.65%（BR001 机构）
 ```
 
-**预期结果**：返回 2025 年 4 个季度的净利润数据：
-```json
-{
-  "data": [
-    {"period": "2025-Q1", "value": 30000},
-    {"period": "2025-Q2", "value": 32000},
-    {"period": "2025-Q3", "value": 33000},
-    {"period": "2025-Q4", "value": 30000}
-  ]
-}
+---
+
+### 案例 4：同义词匹配
+
+**用户输入**：
+```
+查一下纯利润
 ```
 
-### 测试案例 4：跨年趋势分析
+**预期响应**：AI 识别"纯利润"是"净利润"的同义词，调用 `query_financial_metrics` 工具返回净利润数据。
 
-```bash
-curl -s -X POST http://localhost:8001/mcp \
-  -H "Authorization: Bearer <ACCESS_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "NET_PROFIT", "granularity": "yearly"}}, "id": 4}'
+---
+
+### 案例 5：跨年趋势分析
+
+**用户输入**：
+```
+最近三年的资产总额变化趋势
 ```
 
-**预期结果**：返回最近 3 年的净利润趋势：
-```json
-{
-  "data": [
-    {"period": "2025", "value": 125000.0},
-    {"period": "2024", "value": 112000.0},
-    {"period": "2023", "value": 98000.0}
-  ]
-}
+**预期响应**：AI 调用 `query_financial_metrics` 工具（metric=TOTAL_ASSETS, granularity=yearly），返回：
+```
+资产总额趋势（BR001 机构）：
+- 2025 年：9,800,000 万元
+- 2024 年：9,200,000 万元
+- 2023 年：8,500,000 万元
+年均增长约 7.5%
 ```
 
-### 测试案例 5：RLS 行级安全验证
+---
 
-使用不同用户的 Token（000000003，机构 BR002）：
+### 案例 6：多指标对比
 
-```bash
-# 生成 BR002 用户 Token
-ACCESS_TOKEN_BR002=$(python3 -c "... user_id: '000000003' ...")
-
-# 查询不良贷款率
-curl -s -X POST http://localhost:8001/mcp \
-  -H "Authorization: Bearer $ACCESS_TOKEN_BR002" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "NPL_RATIO", "year": 2025}}, "id": 5}'
+**用户输入**：
+```
+比较一下贷款余额和存款余额
 ```
 
-**预期结果**：返回 BR002 机构的数据（而非 BR001）：
-```json
-{
-  "metric": "NPL_RATIO",
-  "branch_id": "BR002",
-  "data": [{"period": "2025", "value": 1.82}]
-}
+**预期响应**：AI 分别调用 `query_financial_metrics` 查询 LOAN_BALANCE 和 DEPOSIT_BALANCE，返回对比数据：
+```
+2025 年对比（BR001 机构）：
+- 贷款余额：6,400,000 万元
+- 存款余额：8,200,000 万元
+存贷比：78%
 ```
 
-**对比 BR001 用户数据**：BR001 用户查询同一指标返回 `value: 1.58`，验证 RLS 生效。
+---
 
-### 测试案例 6：白名单验证
+### 案例 7：季度明细查询
 
-```bash
-curl -s -X POST http://localhost:8001/mcp \
-  -H "Authorization: Bearer <ACCESS_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "INVALID_METRIC", "year": 2025}}, "id": 6}'
+**用户输入**：
+```
+今年各季度的净利息收入
 ```
 
-**预期结果**：返回错误提示：
-```json
-{"error": "不支持的指标: INVALID_METRIC。请先调用 get_finance_dictionary 获取支持的指标列表"}
+**预期响应**：AI 调用 `query_financial_metrics` 工具（metric=NET_INTEREST_INCOME, year=2025, granularity=quarterly），返回：
+```
+2025 年净利息收入（BR001 机构）：
+- Q1：125,000 万元
+- Q2：132,000 万元
+- Q3：138,000 万元
+- Q4：125,000 万元
+全年合计：520,000 万元
 ```
 
-### 测试案例 7：参数验证
+---
 
-```bash
-# 无效季度
-curl -s ... -d '{"...": {"metric": "NET_PROFIT", "year": 2025, "quarter": 5}}'
-# 预期：{"error": "季度必须在 1-4 之间"}
+### 案例 8：风险指标查询
 
-# 无效月份
-curl -s ... -d '{"...": {"metric": "NET_PROFIT", "year": 2025, "month": 13}}'
-# 预期：{"error": "月份必须在 1-12 之间"}
+**用户输入**：
 ```
+今年的资本充足率和不良贷款率
+```
+
+**预期响应**：AI 调用两次 `query_financial_metrics` 工具，返回：
+```
+2025 年风险指标（BR001 机构）：
+- 资本充足率：15.2%
+- 不良贷款率：1.58%
+两项指标均符合监管要求
+```
+
+---
+
+### 案例 9：无效指标测试
+
+**用户输入**：
+```
+查询营业收入
+```
+
+**预期响应**：AI 先调用 `get_finance_dictionary` 查找匹配项，发现不在列表中，返回：
+```
+抱歉，"营业收入"不在支持的指标列表中。
+目前支持的盈利能力指标有：
+- 净利润（NET_PROFIT）
+- 净利息收入（NET_INTEREST_INCOME）
+```
+
+---
+
+### 案例 10：RLS 行级安全验证
+
+**切换用户后输入**：
+```
+查询今年的不良贷款率
+```
+
+**预期响应**：不同机构用户返回不同数据：
+- BR001 用户（000000001）：返回 1.58%
+- BR002 用户（000000003）：返回 1.82%
+
+AI 不感知机构差异，数据隔离由后端自动完成。
+
+---
+
+### 测试案例汇总表
+
+| # | 自然语言输入 | 调用工具 | 验证点 |
+|---|-------------|----------|--------|
+| 1 | 有哪些财务指标可以查询？ | get_finance_dictionary | 字典返回 |
+| 2 | 查询去年的净利润 | query_financial_metrics | 年度查询 |
+| 3 | 今年一季度的不良率是多少？ | query_financial_metrics | 季度参数 |
+| 4 | 查一下纯利润 | query_financial_metrics | 同义词匹配 |
+| 5 | 最近三年的资产总额变化趋势 | query_financial_metrics | 跨年趋势 |
+| 6 | 比较一下贷款余额和存款余额 | query_financial_metrics × 2 | 多指标对比 |
+| 7 | 今年各季度的净利息收入 | query_financial_metrics | 季度明细 |
+| 8 | 今年的资本充足率和不良贷款率 | query_financial_metrics × 2 | 风险指标 |
+| 9 | 查询营业收入 | get_finance_dictionary | 无效指标提示 |
+| 10 | 查询今年的不良贷款率 | query_financial_metrics | RLS 隔离 |
 
 ## 目录结构
 
