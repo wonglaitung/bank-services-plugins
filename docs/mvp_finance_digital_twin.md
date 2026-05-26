@@ -1047,7 +1047,9 @@ AI Agent（如 OpenClaw）的系统提示词由厂商控制，用户无法自定
 
 ### 8.2 解决方案：Skill 固化 SOP
 
-通过 Claude Code 的 **Skill 机制**，将财务查询的 SOP（标准操作流程）固化到可执行的工作流中。
+通过 Claude Code 的 **Skill 机制**，将财务查询的 SOP（标准操作流程）固化到 SKILL.md 文档中。
+
+**核心理念**：Skill 不需要编写 Python 脚本，只需通过 SKILL.md 文档固化流程，实际数据查询通过调用 MCP 工具完成。
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -1062,7 +1064,7 @@ AI Agent（如 OpenClaw）的系统提示词由厂商控制，用户无法自定
 │                                                                             │
 │  Skill 方式（可控）：                                                         │
 │  ┌─────────────────┐      ┌─────────────────┐                              │
-│  │ 用户输入        │ ───▶ │ Skill 工作流    │                              │
+│  │ 用户输入        │ ───▶ │ SKILL.md        │                              │
 │  │ "查去年的利润"  │      │ (固化 SOP)      │                              │
 │  └─────────────────┘      └────────┬────────┘                              │
 │                                    │                                        │
@@ -1083,17 +1085,138 @@ AI Agent（如 OpenClaw）的系统提示词由厂商控制，用户无法自定
 
 ```
 .claude/skills/finance-query/
-├── SKILL.md                    # 技能文档
-├── finance_query/              # Python 模块
-│   ├── __init__.py
-│   ├── semantic_matcher.py     # 语义匹配逻辑
-│   └── formatter.py            # 输出格式化
-├── scripts/
-│   └── finance_query.py        # CLI 入口
-└── requirements.txt
+└── SKILL.md                    # 技能文档（唯一必需文件）
 ```
 
-### 8.4 Skill 与 MCP 工具的关系
+**说明**：
+- 只需要 SKILL.md 文档即可固化 SOP
+- 无需 Python 脚本，数据查询通过 MCP 工具完成
+- Claude Code 读取 SKILL.md 后自动按流程执行
+
+### 8.4 SKILL.md 完整内容
+
+```markdown
+# 财务数据查询 Skill
+
+## 功能描述
+
+帮助用户查询银行财务数据，自动完成语义匹配和数据格式化。
+
+## 使用场景
+
+当用户需要查询财务指标时，如：
+- "去年的净利润是多少？"
+- "一季度的不良贷款率"
+- "最近三年的资产总额变化"
+
+## 执行流程
+
+### 步骤 1：获取指标字典
+
+调用 MCP 工具 `get_finance_dictionary`，获取所有支持的指标列表。
+
+### 步骤 2：语义匹配
+
+根据用户输入的关键词，在字典的 synonyms 字段中查找匹配项：
+
+| 用户输入 | 匹配字段 | standard_name |
+|----------|----------|---------------|
+| "纯利润" | synonyms | NET_PROFIT |
+| "不良率" | synonyms | NPL_RATIO |
+| "总资产" | synonyms | TOTAL_ASSETS |
+
+**匹配策略**：
+1. 精确匹配 synonyms 中的任一别名
+2. 模糊匹配（相似度 > 0.8）
+3. 无法匹配时，提示用户可用的指标列表
+
+### 步骤 3：调用查询工具
+
+使用匹配到的 `standard_name` 调用 `query_financial_metrics` 工具。
+
+### 步骤 4：格式化输出
+
+将返回的数据格式化为易读的报告：
+
+```
+📊 财务指标查询结果
+
+指标：净利润（NET_PROFIT）
+时间：2025 年
+单位：万元
+
+| 时期 | 数值 |
+|------|------|
+| 2025 | 125,000.00 |
+
+数据来源：财务数仓（自动过滤当前用户所属机构）
+查询时间：2026-05-26 10:30:00
+```
+
+### 步骤 5：异常处理
+
+**情况 1：指标无法匹配**
+
+```
+❌ 无法识别的指标："报销差旅费"
+
+目前支持的财务指标包括：
+
+📈 盈利能力：
+  • 净利润（纯利润、税后利润）
+  • 净利息收入（息差收入）
+
+📊 规模指标：
+  • 资产总额（总资产）
+
+⚠️ 风险指标：
+  • 不良贷款率（不良率、NPL）
+  • 资本充足率（CAR）
+
+您可以换个说法，例如："去年的净利润是多少？"
+```
+
+**情况 2：无数据**
+
+```
+⚠️ 查询成功，但未找到数据
+
+查询条件：
+  • 指标：净利润
+  • 年份：2025
+  • 季度：3
+
+可能原因：
+  1. 当前机构暂无该时期数据
+  2. 数据尚未入库
+
+建议：尝试查询其他时间段或指标
+```
+
+## 调用方式
+
+### 命令行
+
+```bash
+# 交互式查询
+/finance-query
+
+# 直接传入问题
+/finance-query "去年的净利润是多少？"
+```
+
+### 自然语言触发
+
+当用户提到财务相关问题时，Claude Code 自动识别并调用此 Skill。
+
+## 注意事项
+
+- 此 Skill 仅支持查询，不支持修改数据
+- 所有查询自动应用 RLS 行级安全过滤
+- 查询结果仅显示当前用户所属机构的数据
+```
+
+### 8.5 Skill 与 MCP 工具的关系
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -1103,9 +1226,9 @@ AI Agent（如 OpenClaw）的系统提示词由厂商控制，用户无法自定
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │ Skill 层（业务编排）                                                 │   │
 │  │                                                                     │   │
-│  │  finance-query Skill                                                │   │
+│  │  finance-query Skill (SKILL.md)                                     │   │
 │  │  • 接收用户自然语言输入                                              │   │
-│  │  • 调用 MCP 工具获取字典和数据                                       │   │
+│  │  • 指引 Claude Code 调用 MCP 工具获取字典和数据                       │   │
 │  │  • 本地语义匹配和结果格式化                                          │   │
 │  │  • 统一的错误处理和用户引导                                          │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
@@ -1123,21 +1246,114 @@ AI Agent（如 OpenClaw）的系统提示词由厂商控制，用户无法自定
 │                                                                             │
 │  分层原则：                                                                  │
 │  • MCP 工具提供原子能力，保持简单、可复用                                     │
-│  • Skill 封装业务流程，固化 SOP，处理用户体验                                  │
+│  • Skill 通过 SKILL.md 固化流程，处理用户体验                                  │
+│  • Skill 无需编写代码，只需文档化流程                                         │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 8.5 Skill 开发检查清单
+### 8.6 语义匹配关键逻辑
+
+Claude Code 执行 Skill 时，按以下逻辑进行语义匹配：
+
+```python
+# 语义匹配伪代码（由 Claude Code 内部执行）
+
+def match_metric(keyword: str, dictionary: dict) -> str | None:
+    """
+    匹配用户关键词到标准指标名
+
+    Args:
+        keyword: 用户输入的关键词（如"纯利润"）
+        dictionary: get_finance_dictionary() 返回的字典
+
+    Returns:
+        匹配到的 standard_name，未匹配返回 None
+    """
+    keyword_lower = keyword.lower()
+
+    # 构建同义词索引
+    synonym_index = {}
+    for metric in dictionary["metrics"]:
+        standard_name = metric["standard_name"]
+        # 标准名称
+        synonym_index[standard_name.lower()] = standard_name
+        # 显示名称
+        synonym_index[metric["display_name"].lower()] = standard_name
+        # 同义词
+        for syn in metric.get("synonyms", []):
+            synonym_index[syn.lower()] = standard_name
+
+    # 1. 精确匹配
+    if keyword_lower in synonym_index:
+        return synonym_index[keyword_lower]
+
+    # 2. 模糊匹配（相似度 > 0.8）
+    best_match = None
+    best_score = 0
+    for syn, standard_name in synonym_index.items():
+        score = similarity(keyword_lower, syn)  # 如 difflib.SequenceMatcher
+        if score > best_score and score >= 0.8:
+            best_score = score
+            best_match = standard_name
+
+    return best_match
+```
+
+### 8.7 输出格式化关键逻辑
+
+```python
+# 输出格式化伪代码（由 Claude Code 内部执行）
+
+def format_result(data: dict) -> str:
+    """
+    格式化查询结果为易读报告
+
+    Args:
+        data: query_financial_metrics() 返回的数据
+
+    Returns:
+        格式化的 Markdown 文本
+    """
+    lines = []
+    lines.append("📊 财务指标查询结果")
+    lines.append("")
+    lines.append(f"**指标**：{data['metric_name']}（{data['metric']}）")
+    lines.append(f"**单位**：{data['unit']}")
+    lines.append(f"**机构**：{data['branch_id']}")
+    lines.append("")
+
+    # 数据表格
+    rows = data.get("data", [])
+    if rows:
+        lines.append("| 时期 | 数值 |")
+        lines.append("|------|------|")
+        for row in rows:
+            period = row.get("period", "-")
+            value = row.get("value", 0)
+            if isinstance(value, (int, float)):
+                value_str = f"{value:,.2f}"
+            else:
+                value_str = str(value)
+            lines.append(f"| {period} | {value_str} |")
+    else:
+        lines.append("*暂无数据*")
+
+    lines.append("")
+    lines.append(f"*查询时间：{current_time()}*")
+
+    return "\n".join(lines)
+```
+
+### 8.8 Skill 开发检查清单
 
 | # | 检查项 | 说明 |
 |---|--------|------|
 | 1 | SKILL.md 文档完整 | 包含功能描述、使用场景、执行流程 |
-| 2 | 语义匹配准确率 > 95% | 测试常见同义词匹配 |
-| 3 | 异常提示友好 | 无法匹配时提供可用指标列表 |
+| 2 | 执行流程步骤清晰 | 每步说明调用哪个 MCP 工具 |
+| 3 | 异常处理说明完整 | 无法匹配时提供可用指标列表 |
 | 4 | 输出格式规范 | 表格清晰、单位明确 |
-| 5 | 跨平台兼容 | Windows/Linux 均可运行 |
-| 6 | 单元测试覆盖 | 测试语义匹配和格式化逻辑 |
+| 5 | 自然语言触发词明确 | 帮助 Claude Code 识别何时调用 |
 
 ---
 
