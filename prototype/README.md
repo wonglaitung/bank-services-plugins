@@ -116,6 +116,8 @@ python mcp_remote/main.py &       # 端口 8001
 
 ## 可用工具
 
+### 用户信息工具
+
 | 工具名 | 说明 |
 |--------|------|
 | `get_my_info` | 获取当前用户的完整信息 |
@@ -123,6 +125,13 @@ python mcp_remote/main.py &       # 端口 8001
 | `get_my_balance` | 获取当前用户账户余额 |
 | `check_my_permission` | 检查当前用户权限 |
 | `list_all_users` | 管理员查询所有用户信息（不含金额） |
+
+### 财务数据工具
+
+| 工具名 | 说明 |
+|--------|------|
+| `get_finance_dictionary` | 获取财务指标元数据字典（包含指标列表和同义词） |
+| `query_financial_metrics` | 查询财务指标数据（支持年份、季度、月度维度） |
 
 **安全特性**：
 - 所有工具不接受 `user_id` 参数，用户身份从 Token 自动获取
@@ -138,6 +147,33 @@ python mcp_remote/main.py &       # 端口 8001
 | 000000003 | 王五 | 技术部 | viewer | 88,000 |
 | 000000004 | 赵六 | 人事部 | viewer | 150,000 |
 | 000000005 | 钱七 | 技术部 | admin | 320,000 |
+
+## 财务指标字典
+
+### 支持的指标
+
+| 标准名称 | 显示名 | 分类 | 单位 | 同义词 |
+|----------|--------|------|------|--------|
+| `NET_PROFIT` | 净利润 | 盈利能力 | 万元 | 纯利润、税后利润、利润总额 |
+| `NET_INTEREST_INCOME` | 净利息收入 | 盈利能力 | 万元 | 利息收入、息差收入、净利息 |
+| `TOTAL_ASSETS` | 资产总额 | 规模指标 | 万元 | 总资产、资产负债表资产、资产规模 |
+| `TOTAL_LIABILITIES` | 负债总额 | 规模指标 | 万元 | 总负债、负债规模 |
+| `NPL_RATIO` | 不良贷款率 | 风险指标 | % | 不良率、NPL |
+| `CAR_RATIO` | 资本充足率 | 风险指标 | % | CAR |
+| `LOAN_BALANCE` | 贷款余额 | 业务指标 | 万元 | 贷款总额、贷款规模 |
+| `DEPOSIT_BALANCE` | 存款余额 | 业务指标 | 万元 | 存款总额、存款规模 |
+
+### 用户-机构映射（RLS）
+
+| 用户编号 | 机构代码 | 机构说明 |
+|----------|----------|----------|
+| 000000001 | BR001 | 某分行 |
+| 000000002 | BR001 | 某分行 |
+| 000000003 | BR002 | 另一分行 |
+| 000000004 | BR001 | 某分行 |
+| 000000005 | BR002 | 另一分行 |
+
+**RLS 说明**：不同机构用户查询财务数据时，自动过滤为所属机构数据，实现数据隔离。
 
 ## 环境变量说明
 
@@ -206,6 +242,153 @@ curl -X POST http://localhost:8001/auth/revoke \
 | Token 无效 | 使用错误的 Token | 返回 401 "Token 格式错误" |
 | Token 吊销 | 吊销后使用 Refresh Token | 返回 401 "Token 已被吊销" |
 | IDOR 防护 | 请求他人数据 | 返回当前用户数据 |
+
+## 财务接口测试案例
+
+### 测试环境准备
+
+```bash
+# 生成 Access Token（用户 000000001，机构 BR001）
+python3 -c "
+import os, json, base64, secrets
+from datetime import datetime, timezone, timedelta
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+TOKEN_KEY = b'prototype-test-key-32-bytes-!!!!'
+now = datetime.now(timezone.utc)
+expires_at = now + timedelta(minutes=15)
+jti = secrets.token_urlsafe(16)
+token_data = {'user_id': '000000001', 'token_type': 'access', 'jti': jti, 'expires_at': expires_at.strftime('%Y-%m-%dT%H:%M:%SZ')}
+aesgcm = AESGCM(TOKEN_KEY)
+nonce = os.urandom(12)
+plaintext = json.dumps(token_data).encode('utf-8')
+ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+print(base64.b64encode(nonce + ciphertext).decode('utf-8'))
+"
+```
+
+### 测试案例 1：获取财务指标字典
+
+```bash
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "get_finance_dictionary", "arguments": {}}, "id": 1}'
+```
+
+**预期结果**：返回 8 个财务指标的元数据字典，包含 `metrics` 和 `dimensions` 字段。
+
+### 测试案例 2：查询年度净利润
+
+```bash
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "NET_PROFIT", "year": 2025}}, "id": 2}'
+```
+
+**预期结果**：
+```json
+{
+  "metric": "NET_PROFIT",
+  "metric_name": "净利润",
+  "unit": "万元",
+  "branch_id": "BR001",
+  "data": [{"period": "2025", "value": 125000.0}]
+}
+```
+
+### 测试案例 3：查询季度净利润
+
+```bash
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "NET_PROFIT", "year": 2025, "granularity": "quarterly"}}, "id": 3}'
+```
+
+**预期结果**：返回 2025 年 4 个季度的净利润数据：
+```json
+{
+  "data": [
+    {"period": "2025-Q1", "value": 30000},
+    {"period": "2025-Q2", "value": 32000},
+    {"period": "2025-Q3", "value": 33000},
+    {"period": "2025-Q4", "value": 30000}
+  ]
+}
+```
+
+### 测试案例 4：跨年趋势分析
+
+```bash
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "NET_PROFIT", "granularity": "yearly"}}, "id": 4}'
+```
+
+**预期结果**：返回最近 3 年的净利润趋势：
+```json
+{
+  "data": [
+    {"period": "2025", "value": 125000.0},
+    {"period": "2024", "value": 112000.0},
+    {"period": "2023", "value": 98000.0}
+  ]
+}
+```
+
+### 测试案例 5：RLS 行级安全验证
+
+使用不同用户的 Token（000000003，机构 BR002）：
+
+```bash
+# 生成 BR002 用户 Token
+ACCESS_TOKEN_BR002=$(python3 -c "... user_id: '000000003' ...")
+
+# 查询不良贷款率
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer $ACCESS_TOKEN_BR002" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "NPL_RATIO", "year": 2025}}, "id": 5}'
+```
+
+**预期结果**：返回 BR002 机构的数据（而非 BR001）：
+```json
+{
+  "metric": "NPL_RATIO",
+  "branch_id": "BR002",
+  "data": [{"period": "2025", "value": 1.82}]
+}
+```
+
+**对比 BR001 用户数据**：BR001 用户查询同一指标返回 `value: 1.58`，验证 RLS 生效。
+
+### 测试案例 6：白名单验证
+
+```bash
+curl -s -X POST http://localhost:8001/mcp \
+  -H "Authorization: Bearer <ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "query_financial_metrics", "arguments": {"metric": "INVALID_METRIC", "year": 2025}}, "id": 6}'
+```
+
+**预期结果**：返回错误提示：
+```json
+{"error": "不支持的指标: INVALID_METRIC。请先调用 get_finance_dictionary 获取支持的指标列表"}
+```
+
+### 测试案例 7：参数验证
+
+```bash
+# 无效季度
+curl -s ... -d '{"...": {"metric": "NET_PROFIT", "year": 2025, "quarter": 5}}'
+# 预期：{"error": "季度必须在 1-4 之间"}
+
+# 无效月份
+curl -s ... -d '{"...": {"metric": "NET_PROFIT", "year": 2025, "month": 13}}'
+# 预期：{"error": "月份必须在 1-12 之间"}
+```
 
 ## 目录结构
 
