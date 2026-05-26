@@ -1,6 +1,27 @@
 # MCP 工具描述最佳实践
 
+> **版本**：1.1.0
+> **最后更新**：2026-05-26
+> **适用范围**：MCP (Model Context Protocol) 工具开发
+
 本文档定义了 MCP 工具描述的编写规范，旨在提升大模型的**意图识别准确性**和**调用可靠性**。
+
+---
+
+## 0. 术语规范
+
+本文档使用的核心术语定义如下：
+
+| 术语 | 英文 | 定义 | 示例 |
+|------|------|------|------|
+| 触发场景 | Trigger Scenario | 用户提问时使用的表达方式 | "我的余额"、"账户余额" |
+| 语义单一性 | Semantic Singularity | 每个工具职责唯一，不重叠 | 部门工具只返回部门字段 |
+| 权限标记 | Permission Tag | 工具权限等级的显式标注 | `【管理员权限工具】` |
+| 过滤返回 | Filtered Return | 移除与工具职责无关的字段 | 部门工具删除余额字段 |
+| 身份隔离 | Identity Isolation | 用户身份从上下文获取，不接受参数 | 不接受 user_id 参数 |
+| 元数据工具 | Metadata Tool | 提供结构信息的查询工具 | `describe_table` |
+
+---
 
 ## 核心原则
 
@@ -101,7 +122,135 @@ async def get_my_department() -> dict:
 
 ---
 
-## 3. 权限和安全标记
+## 2.5 工具复杂度分类
+
+根据参数数量和返回复杂度，工具可分为四个等级：
+
+| 复杂度 | 特征 | 典型工具数 | 描述策略 |
+|--------|------|-----------|----------|
+| **简单** | 无参数，单一返回 | 3-5 个 | 详细描述触发场景和返回字段 |
+| **中等** | 1-3 个参数，可选字段 | 5-15 个 | 提供参数表、默认值和示例 |
+| **复杂** | 4+ 参数，多维查询 | 15-30 个 | 按业务域拆分，提供元数据工具 |
+| **大宽表** | 50+ 字段，多聚合方式 | 1-5 个 | 参考第 11 章，使用元数据工具 |
+
+### 简单工具示例
+
+```python
+@mcp.tool()
+async def get_my_balance() -> dict:
+    """
+    获取当前用户的账户余额。
+
+    当用户询问"我的余额"、"我还有多少钱"时调用此工具。
+    返回 user_id、name、balance 三个字段。
+    不接受任何参数，身份从认证上下文获取。
+    """
+```
+
+### 中等工具示例
+
+```python
+@mcp.tool()
+async def query_orders(
+    status: str = "all",     # 订单状态：all/pending/completed
+    limit: int = 10          # 返回数量：1-100，默认 10
+) -> dict:
+    """
+    查询订单列表。
+
+    当用户询问"我的订单"、"订单列表"或"查看订单"时调用此工具。
+
+    参数说明：
+    | 参数 | 类型 | 默认值 | 说明 |
+    |------|------|--------|------|
+    | status | str | "all" | 订单状态筛选 |
+    | limit | int | 10 | 返回数量上限 |
+
+    示例：
+    - "我的待处理订单" → status="pending"
+    - "最近5个订单" → limit=5
+    """
+```
+
+### 复杂工具示例
+
+```python
+@mcp.tool()
+async def query_sales_data(
+    metrics: list[str],      # 必需：查询指标
+    dimensions: list[str],   # 可选：分组维度
+    filters: dict = None,    # 可选：筛选条件
+    time_range: str = "30d", # 可选：时间范围
+    order_by: str = None,    # 可选：排序字段
+    limit: int = 100         # 可选：返回上限
+) -> dict:
+    """
+    查询销售数据（支持多维度分析）。
+
+    当用户需要进行销售数据分析、多条件筛选或按维度汇总时调用。
+
+    必需参数：metrics（至少指定一个指标）
+    可选参数：dimensions、filters、time_range、order_by、limit
+
+    完整参数说明请调用 describe_sales_query() 获取。
+
+    示例：
+    - "各地区销售额" → metrics=["sales"], dimensions=["region"]
+    - "华东区最近一个月各产品销量和利润"
+      → metrics=["quantity", "profit"], dimensions=["product"],
+         filters={"region": "华东"}, time_range="30d"
+    """
+```
+
+---
+
+## 3. 工具命名规范
+
+### 查询类命名
+
+| 前缀 | 用途 | 示例 |
+|------|------|------|
+| `get_<subject>` | 获取单个实体 | `get_my_balance`, `get_order_detail` |
+| `list_<subject>` | 列出多个实体 | `list_all_users`, `list_orders` |
+| `query_<subject>` | 灵活条件查询 | `query_sales_data`, `query_orders` |
+| `search_<subject>` | 搜索/模糊匹配 | `search_users`, `search_products` |
+
+### 修改类命名
+
+| 前缀 | 用途 | 示例 |
+|------|------|------|
+| `create_<subject>` | 创建新实体 | `create_order`, `create_user` |
+| `update_<subject>` | 更新现有实体 | `update_profile`, `update_order` |
+| `delete_<subject>` | 删除实体 | `delete_order`, `delete_record` |
+| `batch_<action>` | 批量操作 | `batch_update_status` |
+
+### 元数据类命名
+
+| 前缀 | 用途 | 示例 |
+|------|------|------|
+| `describe_<subject>` | 描述结构/字段 | `describe_table`, `describe_query` |
+| `list_<subject>_types` | 列出可用类型 | `list_table_types`, `list_metrics` |
+| `get_<subject>_schema` | 获取数据模式 | `get_table_schema` |
+
+### 命名最佳实践
+
+```python
+# ✅ 好的命名：动词+名词，语义清晰
+get_my_balance
+list_all_users
+query_sales_data
+describe_table
+
+# ❌ 不好的命名：含义模糊或过长
+balance                    # 缺少动词
+get_user_balance_info      # 过长，冗余
+query_data                 # 太模糊
+do_query_sales             # do 无意义
+```
+
+---
+
+## 4. 权限和安全标记
 
 ### 为什么重要
 
@@ -137,7 +286,7 @@ async def list_all_users() -> dict:
 
 ---
 
-## 4. 返回数据说明
+## 5. 返回数据说明
 
 ### 为什么重要
 
@@ -171,7 +320,7 @@ async def get_my_balance() -> dict:
 
 ---
 
-## 5. 输入参数约束
+## 6. 输入参数约束
 
 ### 为什么重要
 
@@ -207,7 +356,7 @@ async def get_my_balance() -> dict:
 
 ---
 
-## 6. 描述结构模板
+## 7. 描述结构模板
 
 ### 推荐结构
 
@@ -264,7 +413,7 @@ async def list_all_users() -> dict:
 
 ---
 
-## 7. 常见错误与修正
+## 8. 常见错误与修正
 
 ### 错误对照表
 
@@ -301,7 +450,7 @@ async def get_my_balance() -> dict:
 
 ---
 
-## 8. 验证方法
+## 9. 验证方法
 
 ### 测试清单
 
@@ -333,9 +482,9 @@ for query, expected_tool in test_cases:
 
 ---
 
-## 9. 进阶技巧
+## 10. 进阶技巧
 
-### 9.1 使用示例（Few-shot）
+### 10.1 使用示例（Few-shot）
 
 在描述中添加使用示例，帮助模型理解调用时机：
 
@@ -350,7 +499,7 @@ for query, expected_tool in test_cases:
 """
 ```
 
-### 9.2 反例说明
+### 10.2 反例说明
 
 说明什么情况**不应调用**此工具：
 
@@ -365,7 +514,7 @@ for query, expected_tool in test_cases:
 """
 ```
 
-### 9.3 关联工具说明
+### 10.3 关联工具说明
 
 说明与其他工具的关系：
 
@@ -383,7 +532,203 @@ for query, expected_tool in test_cases:
 
 ---
 
-## 11. 大宽表/数据仓库场景
+## 11. 常见工具模式库
+
+本节总结常见的工具设计模式，可直接套用。
+
+### 模式1：当前用户查询
+
+适用于查询当前登录用户的个人信息。
+
+```python
+@mcp.tool()
+async def get_my_<subject>() -> dict:
+    """
+    获取当前用户的<功能描述>。
+
+    当用户询问"我的<关键词>"、"个人<关键词>"时调用此工具。
+
+    返回内容：
+    - field1: 说明
+    - field2: 说明
+
+    此工具不接受任何用户标识参数，身份从认证上下文自动获取。
+    仅能查询当前已认证用户的数据。
+    """
+```
+
+**应用场景**：`get_my_balance`、`get_my_profile`、`get_my_permissions`
+
+### 模式2：管理员列表查询
+
+适用于管理员查询所有用户/数据列表。
+
+```python
+@mcp.tool()
+async def list_all_<subjects>() -> dict:
+    """
+    【管理员权限工具】查询所有<实体>的基本信息列表。
+
+    仅限 admin 角色的用户才能调用此工具。
+    当管理员需要查看"所有<实体>"、"<实体>列表"时调用。
+
+    返回内容：
+    - total: 总数
+    - items: 列表，每项包含 field1、field2...
+
+    不包含 <敏感字段> 字段，保护隐私。
+
+    权限检查由后台 API 执行，非管理员调用将返回 403 错误。
+    """
+```
+
+**应用场景**：`list_all_users`、`list_orders`、`list_transactions`
+
+### 模式3：灵活多条件查询
+
+适用于需要多参数、多筛选条件的查询。
+
+```python
+@mcp.tool()
+async def query_<subject>(
+    filters: dict = None,
+    limit: int = 100
+) -> dict:
+    """
+    查询<实体>列表（支持多条件筛选）。
+
+    当用户需要按条件查询<实体>时调用。
+
+    参数说明：
+    | 参数 | 类型 | 默认值 | 说明 |
+    |------|------|--------|------|
+    | filters | dict | {} | 筛选条件 |
+    | limit | int | 100 | 返回数量上限 |
+
+    示例：
+    - "查询<条件A>的<实体>" → filters={"field": "value"}
+    - "最近N个<实体>" → limit=N
+
+    返回数据限制：单次最多 1000 行。
+    """
+```
+
+**应用场景**：`query_orders`、`query_transactions`、`query_logs`
+
+### 模式4：数据仓库聚合查询
+
+适用于大数据量、多维度聚合分析。
+
+```python
+@mcp.tool()
+async def query_<subject>_aggregation(
+    metrics: list[str],
+    dimensions: list[str] = None,
+    filters: dict = None
+) -> dict:
+    """
+    查询<业务域>聚合数据。
+
+    当用户需要"汇总"、"统计"、"按维度分析"时调用。
+
+    参数说明：
+    - metrics: 度量字段列表（数值型，如 amount、count）
+    - dimensions: 维度字段列表（分组依据，如 region、product）
+    - filters: 筛选条件
+
+    示例：
+    - "各地区<指标>" → metrics=["amount"], dimensions=["region"]
+    - "各产品<指标>汇总" → metrics=["amount"], dimensions=["product"]
+
+    完整字段列表请调用 describe_<subject>_fields() 获取。
+    """
+```
+
+**应用场景**：`query_sales_aggregation`、`query_inventory_summary`
+
+### 模式5：元数据查询
+
+适用于提供数据结构信息。
+
+```python
+@mcp.tool()
+async def describe_<subject>() -> dict:
+    """
+    获取<实体>的字段元数据。
+
+    在调用查询工具前，如不确定字段名称，先调用此工具获取。
+    返回字段名、类型、描述、是否可筛选、是否可分组。
+    """
+    return {
+        "fields": [
+            {"name": "field1", "type": "string", "desc": "描述", "filterable": True},
+            {"name": "field2", "type": "int", "desc": "描述", "aggregatable": True}
+        ]
+    }
+```
+
+**应用场景**：`describe_table`、`describe_query_params`、`list_metrics`
+
+---
+
+## 12. 性能和调用限制
+
+### 12.1 返回数据量限制
+
+| 工具类型 | 推荐上限 | 说明 |
+|---------|---------|------|
+| 简单查询 | 100KB | 单次返回数据大小 |
+| 列表查询 | 1,000 行 | 明细数据行数上限 |
+| 聚合查询 | 10,000 行 | 汇总结果行数上限 |
+| 搜索查询 | 50 行 | 搜索结果精简返回 |
+
+### 12.2 超时设置建议
+
+```python
+# 查询类工具：30秒超时
+@timeout(30)
+async def query_data(...):
+    pass
+
+# 列表类工具：60秒超时（可能涉及聚合）
+@timeout(60)
+async def list_all_items(...):
+    pass
+
+# 修改类工具：45秒超时（需要事务处理）
+@timeout(45)
+async def create_record(...):
+    pass
+```
+
+### 12.3 并发调用建议
+
+| 场景 | 建议 |
+|------|------|
+| 查询工具并发 | 同时调用不超过 3 个 |
+| 修改操作 | 必须顺序执行（不并发） |
+| 大数据查询 | 使用分页，避免单次返回大数据 |
+
+### 12.4 在描述中说明限制
+
+```python
+@mcp.tool()
+async def query_large_dataset(...) -> dict:
+    """
+    查询大数据集。
+
+    ...其他描述...
+
+    性能限制：
+    - 单次返回最多 1000 行
+    - 查询超时时间：30 秒
+    - 如需更多数据，使用分页参数 offset 和 limit
+    """
+```
+
+---
+
+## 13. 大宽表/数据仓库场景
 
 ### 11.1 核心挑战
 
@@ -603,15 +948,16 @@ async def query_aggregation(
 
 ---
 
-## 12. 参考资料
+## 14. 参考资料
 
 - [MCP (Model Context Protocol) 官方文档](https://modelcontextprotocol.io/)
 - [Prompt Engineering Guide](https://www.promptingguide.ai/)
 - [OpenAI Function Calling Best Practices](https://platform.openai.com/docs/guides/function-calling)
+- [Anthropic Tool Use Guide](https://docs.anthropic.com/claude/docs/tool-use)
 
 ---
 
-## 附录：工具描述检查清单
+## 附录A：工具描述检查清单
 
 在编写或审查工具描述时，使用以下检查清单：
 
@@ -642,3 +988,233 @@ async def query_aggregation(
 | 6 | 是否标注了只读/可写权限？ | ☐ |
 | 7 | 是否提供了常见查询场景示例？ | ☐ |
 | 8 | 参数是否支持灵活筛选（而非固定字段）？ | ☐ |
+
+---
+
+## 附录B：自动化验证脚本
+
+以下 Python 脚本可自动检查工具描述是否符合规范：
+
+```python
+"""
+MCP 工具描述验证器
+
+用法：
+    python tool_description_validator.py <tool_file.py>
+"""
+
+import re
+import ast
+import sys
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class ValidationResult:
+    """验证结果"""
+    passed: bool
+    issues: list[str]
+    warnings: list[str]
+
+
+class ToolDescriptionValidator:
+    """工具描述自动检查工具"""
+
+    # 必需的描述部分
+    REQUIRED_PATTERNS = {
+        "触发场景": r"当.*询问|调用此工具|时调用",
+        "返回内容": r"返回|返回内容|返回字段",
+    }
+
+    # 可选但推荐的描述部分
+    RECOMMENDED_PATTERNS = {
+        "权限约束": r"权限|admin|仅限|管理员",
+        "参数约束": r"不接受|参数|身份从认证",
+    }
+
+    # 最小描述长度
+    MIN_DESCRIPTION_LENGTH = 50
+
+    @staticmethod
+    def validate(tool_docstring: str, tool_name: str = "unknown") -> ValidationResult:
+        """
+        验证工具描述是否符合规范
+
+        Args:
+            tool_docstring: 工具的 docstring
+            tool_name: 工具名称
+
+        Returns:
+            ValidationResult: 验证结果
+        """
+        issues = []
+        warnings = []
+
+        # 1. 检查描述长度
+        if len(tool_docstring) < MIN_DESCRIPTION_LENGTH:
+            issues.append(
+                f"描述过于简洁（{len(tool_docstring)} 字），"
+                f"建议至少 {MIN_DESCRIPTION_LENGTH} 字"
+            )
+
+        # 2. 检查必需部分
+        for section, pattern in REQUIRED_PATTERNS.items():
+            if not re.search(pattern, tool_docstring):
+                issues.append(f"缺少 '{section}' 说明")
+
+        # 3. 检查推荐部分（仅警告）
+        for section, pattern in RECOMMENDED_PATTERNS.items():
+            if not re.search(pattern, tool_docstring):
+                warnings.append(f"建议添加 '{section}' 说明")
+
+        # 4. 检查命名规范
+        if not ToolDescriptionValidator._check_naming(tool_name):
+            issues.append(
+                f"工具名称 '{tool_name}' 不符合命名规范，"
+                f"建议使用 get_/list_/query_/describe_ 等前缀"
+            )
+
+        # 5. 检查管理员工具标记
+        if "admin" in tool_name.lower() or "all" in tool_name.lower():
+            if "【管理员权限工具】" not in tool_docstring:
+                warnings.append("管理员工具建议添加 '【管理员权限工具】' 标记")
+
+        return ValidationResult(
+            passed=len(issues) == 0,
+            issues=issues,
+            warnings=warnings
+        )
+
+    @staticmethod
+    def _check_naming(tool_name: str) -> bool:
+        """检查命名是否符合规范"""
+        valid_prefixes = [
+            "get_", "list_", "query_", "search_",  # 查询类
+            "create_", "update_", "delete_",        # 修改类
+            "describe_", "check_", "validate_"      # 元数据类
+        ]
+        return any(tool_name.startswith(prefix) for prefix in valid_prefixes)
+
+
+def validate_file(file_path: str) -> dict:
+    """
+    验证 Python 文件中的所有工具描述
+
+    Args:
+        file_path: Python 文件路径
+
+    Returns:
+        验证结果汇总
+    """
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # 解析 AST
+    tree = ast.parse(content)
+
+    results = {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "tools": []
+    }
+
+    # 查找所有 @mcp.tool() 装饰的函数
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            # 检查是否有 @mcp.tool() 装饰器
+            has_mcp_tool = False
+            for decorator in node.decorator_list:
+                if isinstance(decorator, ast.Call):
+                    if isinstance(decorator.func, ast.Attribute):
+                        if decorator.func.attr == "tool":
+                            has_mcp_tool = True
+                            break
+
+            if has_mcp_tool:
+                results["total"] += 1
+                docstring = ast.get_docstring(node) or ""
+                validation = ToolDescriptionValidator.validate(docstring, node.name)
+
+                tool_result = {
+                    "name": node.name,
+                    "passed": validation.passed,
+                    "issues": validation.issues,
+                    "warnings": validation.warnings
+                }
+
+                results["tools"].append(tool_result)
+
+                if validation.passed:
+                    results["passed"] += 1
+                else:
+                    results["failed"] += 1
+
+    return results
+
+
+def main():
+    """主入口"""
+    if len(sys.argv) < 2:
+        print("用法: python tool_description_validator.py <tool_file.py>")
+        sys.exit(1)
+
+    file_path = sys.argv[1]
+    results = validate_file(file_path)
+
+    print(f"\n{'='*60}")
+    print(f"MCP 工具描述验证报告")
+    print(f"{'='*60}")
+    print(f"文件: {file_path}")
+    print(f"总计: {results['total']} 个工具")
+    print(f"通过: {results['passed']} 个")
+    print(f"失败: {results['failed']} 个")
+    print(f"{'='*60}\n")
+
+    for tool in results["tools"]:
+        status = "✅ 通过" if tool["passed"] else "❌ 失败"
+        print(f"{status} - {tool['name']}")
+
+        if tool["issues"]:
+            for issue in tool["issues"]:
+                print(f"    ❌ {issue}")
+
+        if tool["warnings"]:
+            for warning in tool["warnings"]:
+                print(f"    ⚠️  {warning}")
+
+        print()
+
+    if results["failed"] > 0:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### 使用方法
+
+```bash
+# 验证单个文件
+python tool_description_validator.py prototype/mcp_remote/main.py
+
+# 输出示例
+============================================================
+MCP 工具描述验证报告
+============================================================
+文件: prototype/mcp_remote/main.py
+总计: 5 个工具
+通过: 4 个
+失败: 1 个
+============================================================
+
+✅ 通过 - get_my_info
+✅ 通过 - get_my_balance
+❌ 失败 - get_my_department
+    ❌ 缺少 '参数约束' 说明
+    ⚠️  建议添加 '权限约束' 说明
+✅ 通过 - check_my_permission
+✅ 通过 - list_all_users
+```
