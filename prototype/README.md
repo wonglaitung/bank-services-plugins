@@ -122,8 +122,12 @@ python mcp_remote/main.py &       # 端口 8001
 | `get_my_department` | 获取当前用户所在部门 |
 | `get_my_balance` | 获取当前用户账户余额 |
 | `check_my_permission` | 检查当前用户权限 |
+| `list_all_users` | 管理员查询所有用户信息（不含金额） |
 
-**安全特性**：所有工具不接受 `user_id` 参数，用户身份从 Token 自动获取。
+**安全特性**：
+- 所有工具不接受 `user_id` 参数，用户身份从 Token 自动获取
+- mcp_remote 只传递 user_id，不做业务逻辑判断（如权限检查）
+- 业务逻辑（权限验证、数据验证等）由 backend_api 负责
 
 ## 模拟用户数据
 
@@ -253,11 +257,16 @@ prototype/
 ### 远端 MCP 服务 (mcp_remote)
 
 远端服务提供真正的 MCP 服务功能：
-- 定义所有 Tools（`get_my_info`、`get_my_department`、`get_my_balance`、`check_my_permission`）
+- 定义所有 Tools（`get_my_info`、`get_my_department`、`get_my_balance`、`check_my_permission`、`list_all_users`）
 - 从加密 Token 解密获取用户编号
+- 透传 backend_api 的响应结果
 - 提供 `/auth/refresh` 端点刷新 Token
 - 提供 `/auth/revoke` 端点吊销 Token
 - 正确处理 MCP notification 消息（不返回响应）
+
+**关键原则**：
+- mcp_remote 只传递 user_id，不做业务逻辑判断（如权限检查）
+- 业务逻辑由 backend_api 负责
 
 ### 安全机制
 

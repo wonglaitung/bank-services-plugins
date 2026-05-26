@@ -356,8 +356,6 @@ async def get_my_info() -> dict:
 
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
-        if response.status_code == 404:
-            return {"error": "用户不存在"}
         response.raise_for_status()
         return response.json()
 
@@ -373,15 +371,8 @@ async def get_my_department() -> dict:
 
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
-        if response.status_code == 404:
-            return {"error": "用户不存在"}
         response.raise_for_status()
-        user_data = response.json()
-        return {
-            "user_id": user_id,
-            "name": user_data.get("name"),
-            "department": user_data.get("department")
-        }
+        return response.json()
 
 
 @mcp.tool()
@@ -395,15 +386,8 @@ async def get_my_balance() -> dict:
 
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
-        if response.status_code == 404:
-            return {"error": "用户不存在"}
         response.raise_for_status()
-        user_data = response.json()
-        return {
-            "user_id": user_id,
-            "name": user_data.get("name"),
-            "balance": user_data.get("balance", 0)
-        }
+        return response.json()
 
 
 @mcp.tool()
@@ -417,23 +401,30 @@ async def check_my_permission() -> dict:
 
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{BACKEND_API_URL}/api/user/{user_id}")
-        if response.status_code == 404:
-            return {"error": "用户不存在"}
         response.raise_for_status()
-        user_data = response.json()
-        role = user_data.get("role", "unknown")
+        return response.json()
 
-        return {
-            "user_id": user_id,
-            "name": user_data.get("name"),
-            "role": role,
-            "permissions": {
-                "can_view": True,
-                "can_edit": role == "admin",
-                "can_delete": role == "admin",
-                "can_approve": role == "admin"
-            }
-        }
+
+@mcp.tool()
+async def list_all_users() -> dict:
+    """
+    管理员查询所有用户信息（不含金额）
+
+    只有 admin 角色的用户才能调用此工具。
+    返回所有用户的基本信息列表，不包括余额数据。
+    权限检查由后台 API 执行。
+
+    Returns:
+        用户列表，包含 total 和 users 字段
+        非管理员返回错误信息
+    """
+    user_id = current_user_id.get()
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{BACKEND_API_URL}/api/admin/{user_id}/users")
+        if response.status_code >= 400:
+            return response.json()
+        return response.json()
 
 
 # ==================== MCP 请求端点 ====================

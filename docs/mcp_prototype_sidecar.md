@@ -149,8 +149,8 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
 | 组件 | 职责 | 添加 Tools 时是否需要修改 |
 |------|------|---------------------------|
 | **本地代理** | • 从环境变量读取加密 Token<br>• 透传 MCP JSON-RPC 协议<br>• 在每个请求中自动注入 Authorization Header<br>• 记录本地调用日志 | ❌ **无需修改** |
-| **远端 MCP 服务** | • 定义所有 Tools<br>• 解密 Token 获取用户编号和有效期<br>• 验证有效期<br>• 调用后台 API<br>• 记录审计日志 | ✅ **需要修改** |
-| **后台 API** | • 提供业务数据查询接口<br>• 不感知用户身份（由远端服务控制） | 视业务需求 |
+| **远端 MCP 服务** | • 定义所有 Tools<br>• 解密 Token 获取用户编号和有效期<br>• 验证有效期<br>• 传递 user_id 到后台 API<br>• 记录审计日志 | ✅ **需要修改** |
+| **后台 API** | • 提供业务数据查询接口<br>• 执行业务逻辑（权限检查、数据验证等）<br>• 不感知用户身份（由远端服务传递 user_id） | 视业务需求 |
 
 ### 3.2 各组件详细职责
 
@@ -186,6 +186,11 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
   9. Tool 从上下文获取用户编号，调用后台 API
   10. 记录审计日志
 输出: Tool 执行结果
+
+关键原则：
+- mcp_remote 只传递 user_id，不做业务逻辑判断（如权限检查）
+- 业务逻辑（权限验证、数据验证等）由 backend_api 负责
+- mcp_remote 透传 backend_api 的响应结果
 ```
 
 **新增端点**：
@@ -372,13 +377,13 @@ with open(DATA_FILE, encoding="utf-8") as f:
 async def get_user(user_id: str):
     """
     查询用户信息
-    
+
     Args:
         user_id: 9位数字用户编号
-        
+
     Returns:
         用户信息字典
-        
+
     Raises:
         400: 用户编号格式错误
         404: 用户不存在
@@ -386,13 +391,61 @@ async def get_user(user_id: str):
     # 验证用户编号格式
     if not user_id.isdigit() or len(user_id) != 9:
         raise HTTPException(400, "用户编号必须为9位数字")
-    
+
     # 查询用户
     user = USERS.get(user_id)
     if not user:
         raise HTTPException(404, "用户不存在")
-    
+
     return user
+
+
+@app.get("/api/admin/{user_id}/users")
+async def get_all_users(user_id: str):
+    """
+    管理员查询所有用户信息（不含金额）
+
+    只有 admin 角色的用户才能调用此接口。
+    返回所有用户的基本信息，不包括 balance 字段。
+
+    Args:
+        user_id: 9位数字用户编号（调用者）
+
+    Returns:
+        用户列表，每个用户包含 user_id, name, department, role
+
+    Raises:
+        400: 用户编号格式错误
+        403: 非管理员用户
+        404: 用户不存在
+    """
+    # 验证用户编号格式
+    if not user_id.isdigit() or len(user_id) != 9:
+        raise HTTPException(400, "用户编号必须为9位数字")
+
+    # 查询调用者
+    caller = USERS.get(user_id)
+    if not caller:
+        raise HTTPException(404, "用户不存在")
+
+    # 检查是否为管理员
+    if caller.get("role") != "admin":
+        raise HTTPException(403, "需要管理员权限")
+
+    # 返回所有用户信息（不含金额）
+    users_list = []
+    for uid, user in USERS.items():
+        users_list.append({
+            "user_id": user.get("user_id"),
+            "name": user.get("name"),
+            "department": user.get("department"),
+            "role": user.get("role")
+        })
+
+    return {
+        "total": len(users_list),
+        "users": users_list
+    }
 
 
 @app.get("/health")
@@ -414,19 +467,36 @@ if __name__ == "__main__":
     "user_id": "000000001",
     "name": "张三",
     "department": "财务部",
-    "role": "viewer"
+    "role": "viewer",
+    "balance": 125000.00
   },
   "000000002": {
     "user_id": "000000002",
     "name": "李四",
     "department": "财务部",
-    "role": "admin"
+    "role": "admin",
+    "balance": 250000.00
   },
   "000000003": {
     "user_id": "000000003",
     "name": "王五",
     "department": "技术部",
-    "role": "viewer"
+    "role": "viewer",
+    "balance": 88000.00
+  },
+  "000000004": {
+    "user_id": "000000004",
+    "name": "赵六",
+    "department": "人事部",
+    "role": "viewer",
+    "balance": 150000.00
+  },
+  "000000005": {
+    "user_id": "000000005",
+    "name": "钱七",
+    "department": "技术部",
+    "role": "admin",
+    "balance": 320000.00
   }
 }
 ```
@@ -1009,16 +1079,38 @@ TOKEN_KEY=6Hd+908eMNP0T/4CmFKxdpkHI3HaMrINtej6VCcpx7Y= python prototype/mcp_remo
 async def new_tool_name(param1: str, param2: int = 10) -> dict:
     """
     工具描述（会显示给 Claude）
-    
+
     参数:
         param1: 参数1说明
         param2: 参数2说明
     """
     user_id = current_user_id.get()  # 从上下文获取用户编号
-    
-    # 业务逻辑...
-    
-    return {"result": "..."}
+
+    # 调用后台 API，透传响应
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{BACKEND_API_URL}/api/xxx/{user_id}")
+        response.raise_for_status()
+        return response.json()
+```
+
+**关键原则：**
+- mcp_remote 只传递 user_id，不做业务逻辑判断（如权限检查）
+- 业务逻辑（权限验证、数据验证等）由 backend_api 负责
+- mcp_remote 直接透传 backend_api 的响应结果
+
+**示例：管理员查询所有用户**
+
+```python
+@mcp.tool()
+async def list_all_users() -> dict:
+    """管理员查询所有用户信息（不含金额）"""
+    user_id = current_user_id.get()
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{BACKEND_API_URL}/api/admin/{user_id}/users")
+        if response.status_code >= 400:
+            return response.json()  # 透传错误响应
+        return response.json()
 ```
 
 ### 8.2 后续安全增强
