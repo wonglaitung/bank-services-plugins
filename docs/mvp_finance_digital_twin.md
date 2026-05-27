@@ -214,9 +214,8 @@ USERS_DB = {
 |------|------|------|------|------|
 | **字典** | `/api/finance/dictionary` | GET | 获取财务指标元数据字典 | 所有用户 |
 | **指标查询** | `/api/finance/query` | GET | 查询财务指标数据 | 所有用户（RLS） |
-| **用户信息** | `/api/users/me` | GET | 获取当前用户信息 | 所有用户 |
-| **用户余额** | `/api/users/balance` | GET | 获取当前用户余额 | 所有用户 |
-| **管理员** | `/api/admin/users` | GET | 查询所有用户列表 | 仅管理员 |
+
+**其他端点**（用户信息、管理员等）详见 [MCP 安全认证原型文档](mcp_prototype_sidecar.md)。
 
 ### 3.2 字典端点
 
@@ -345,68 +344,9 @@ async def query_finance_metrics(
         "branch_id": branch_id,
         "data": results
     }
-
-
-# ==================== 用户信息端点 ====================
-
-@app.get("/api/users/me")
-async def get_my_info(x_user_id: str = Header(None, alias="X-User-ID")):
-    """获取当前用户完整信息"""
-    user = USERS_DB.get(x_user_id)
-    if not user:
-        raise HTTPException(404, "用户不存在")
-    return user
-
-
-@app.get("/api/users/balance")
-async def get_my_balance(x_user_id: str = Header(None, alias="X-User-ID")):
-    """获取当前用户账户余额（精简返回）"""
-    user = USERS_DB.get(x_user_id)
-    if not user:
-        raise HTTPException(404, "用户不存在")
-    return {
-        "user_id": user["user_id"],
-        "name": user["name"],
-        "balance": user["balance"]
-    }
-
-
-# ==================== 管理员端点 ====================
-
-from functools import wraps
-
-def require_admin(func):
-    """管理员权限装饰器"""
-    @wraps(func)
-    async def wrapper(*args, x_user_id: str = Header(None, alias="X-User-ID"), **kwargs):
-        user = USERS_DB.get(x_user_id)
-        if not user or user.get("role") != "admin":
-            raise HTTPException(403, "需要管理员权限")
-        return await func(*args, x_user_id=x_user_id, **kwargs)
-    return wrapper
-
-
-@app.get("/api/admin/users")
-@require_admin
-async def list_all_users(x_user_id: str = Header(None, alias="X-User-ID")):
-    """
-    【管理员权限】查询所有用户列表
-
-    不包含 balance 字段，保护用户财务隐私
-    """
-    return {
-        "total": len(USERS_DB),
-        "users": [
-            {
-                "user_id": u["user_id"],
-                "name": u["name"],
-                "department": u["department"],
-                "role": u["role"]
-            }
-            for u in USERS_DB.values()
-        ]
-    }
 ```
+
+**其他端点**（用户信息、管理员等）详见 [MCP 安全认证原型文档](mcp_prototype_sidecar.md)。
 
 ---
 
@@ -418,11 +358,8 @@ async def list_all_users(x_user_id: str = Header(None, alias="X-User-ID")):
 |------|--------|------|------|
 | **字典** | `get_finance_dictionary` | 获取财务指标字典 | 所有用户 |
 | **指标查询** | `query_financial_metrics` | 查询财务指标数据 | 所有用户（RLS） |
-| **用户信息** | `get_my_info` | 获取当前用户完整信息 | 所有用户 |
-| **用户余额** | `get_my_balance` | 获取当前用户余额 | 所有用户 |
-| **用户部门** | `get_my_department` | 获取当前用户部门 | 所有用户 |
-| **权限查询** | `check_my_permission` | 查询当前用户权限 | 所有用户 |
-| **管理员** | `list_all_users` | 查询所有用户列表 | 仅管理员 |
+
+**其他工具**（用户信息、管理员等）详见 [MCP 安全认证原型文档](mcp_prototype_sidecar.md)。
 
 ### 4.2 核心工具实现
 
@@ -532,146 +469,9 @@ async def query_financial_metrics(
             headers={"X-User-ID": user_id}
         )
         return response.json()
-
-
-# ==================== 用户信息工具 ====================
-
-@mcp.tool()
-async def get_my_info() -> dict:
-    """
-    获取当前用户的完整个人信息。
-
-    当用户询问"我的信息"、"我是谁"、"我的资料"、"个人信息"或"查看我的账户"时调用此工具。
-
-    返回内容：
-    - user_id: 用户编号
-    - name: 姓名
-    - department: 部门
-    - role: 角色(viewer/admin)
-    - balance: 账户余额
-
-    此工具不接受任何用户标识参数，身份从认证上下文自动获取。
-    仅能查询当前已认证用户的信息，严禁用于尝试获取他人数据。
-    """
-    user_id = current_user_id.get()
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{BACKEND_API_URL}/api/users/me",
-            headers={"X-User-ID": user_id}
-        )
-        return response.json()
-
-
-@mcp.tool()
-async def get_my_balance() -> dict:
-    """
-    获取当前用户的账户余额。
-
-    当用户询问"我的余额"、"我还有多少钱"、"账户余额"、"财务状况"、
-    "多少钱"或"余额查询"时调用此工具。
-
-    返回内容：
-    - user_id: 用户编号
-    - name: 姓名
-    - balance: 账户余额(数值)
-
-    此工具不接受任何用户标识参数，身份从认证上下文自动获取。
-    仅能查询当前已认证用户的余额，严禁用于尝试获取他人数据。
-    """
-    user_id = current_user_id.get()
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{BACKEND_API_URL}/api/users/balance",
-            headers={"X-User-ID": user_id}
-        )
-        return response.json()
-
-
-@mcp.tool()
-async def get_my_department() -> dict:
-    """
-    获取当前用户所在的部门信息。
-
-    当用户询问"我的部门"、"我在哪个部门"、"部门信息"、"所属部门"
-    或"我是哪个部门的"时调用此工具。
-
-    返回内容：
-    - user_id: 用户编号
-    - name: 姓名
-    - department: 部门名称
-
-    此工具仅返回部门相关数据，不包含余额、角色等其他信息。
-    如需完整信息，请使用 get_my_info 工具。
-    """
-    user_id = current_user_id.get()
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{BACKEND_API_URL}/api/users/department",
-            headers={"X-User-ID": user_id}
-        )
-        return response.json()
-
-
-@mcp.tool()
-async def check_my_permission() -> dict:
-    """
-    检查当前用户的权限和角色。
-
-    当用户询问"我的权限"、"我能做什么"、"角色信息"、"我的角色"、
-    "有什么权限"或"权限查询"时调用此工具。
-
-    返回内容：
-    - user_id: 用户编号
-    - name: 姓名
-    - department: 部门
-    - role: 角色(viewer=普通用户,admin=管理员)
-
-    角色说明：
-    - viewer: 普通用户，仅能查询自己的数据
-    - admin: 管理员，可调用 list_all_users 查询所有用户
-
-    此工具不接受任何用户标识参数，身份从认证上下文自动获取。
-    """
-    user_id = current_user_id.get()
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{BACKEND_API_URL}/api/users/permission",
-            headers={"X-User-ID": user_id}
-        )
-        return response.json()
-
-
-# ==================== 管理员工具 ====================
-
-@mcp.tool()
-async def list_all_users() -> dict:
-    """
-    【管理员权限工具】查询所有用户的基本信息列表。
-
-    仅限 admin 角色的用户才能调用此工具。
-    当管理员需要查看"所有用户"、"用户列表"、"有多少用户"、"全部用户"或"用户统计"时调用。
-
-    返回内容：
-    - total: 用户总数
-    - users: 用户列表，每个用户包含：
-        - user_id: 用户编号
-        - name: 姓名
-        - department: 部门
-        - role: 角色
-
-    不包含 balance(余额)字段，保护用户财务隐私。
-
-    权限检查由后台 API 执行，非管理员调用将返回 403 错误。
-    如不确定自己的角色，请先调用 check_my_permission 工具查询。
-    """
-    user_id = current_user_id.get()
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{BACKEND_API_URL}/api/admin/users",
-            headers={"X-User-ID": user_id}
-        )
-        return response.json()
 ```
+
+**其他工具**（用户信息、管理员等）详见 [MCP 安全认证原型文档](mcp_prototype_sidecar.md)。
 
 ---
 
