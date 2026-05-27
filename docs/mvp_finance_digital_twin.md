@@ -1,6 +1,6 @@
 # 银行财务数字分身 MVP 实施方案
 
-> **版本**：3.1.0
+> **版本**：4.0.0
 > **最后更新**：2026-05-27
 > **适用范围**：银行财务数据仓库安全接入 MCP
 
@@ -9,13 +9,13 @@
 ## 目录
 
 1. [概述](#1-概述)
-2. [后台 API 设计](#2-后台-api-设计)
-3. [财务指标字典](#3-财务指标字典)
+2. [数据模型](#2-数据模型)
+3. [后台 API 设计](#3-后台-api-设计)
 4. [MCP 工具定义](#4-mcp-工具定义)
 5. [安全机制](#5-安全机制)
 6. [配置与部署](#6-配置与部署)
-7. [Skill 固化查询 SOP](#7-skill-固化查询-sop)
-8. [大宽表/数据仓库工具设计](#8-大宽表数据仓库工具设计)
+7. [设计指南](#7-设计指南)
+8. [实施计划](#8-实施计划)
 
 ---
 
@@ -55,229 +55,23 @@
 
 ---
 
-## 2. 后台 API 设计
+## 2. 数据模型
 
-### 2.1 API 端点清单
+### 2.1 数据层次结构
 
-| 端点 | 方法 | 说明 | 权限 |
-|------|------|------|------|
-| `/api/finance/dictionary` | GET | 获取财务指标元数据字典 | 所有用户 |
-| `/api/finance/query` | GET | 查询财务指标数据 | 所有用户（RLS） |
-| `/api/users/me` | GET | 获取当前用户信息 | 所有用户 |
-| `/api/users/balance` | GET | 获取当前用户余额 | 所有用户 |
-| `/api/admin/users` | GET | 查询所有用户列表 | 仅管理员 |
-
-### 2.2 字典端点
-
-**请求示例**：
-
-```bash
-GET /api/finance/dictionary
+```
+财务数据仓库
+├── 财务指标（Metrics）        # 单一数值，如净利润、不良率
+├── 财务报表（Reports）        # 结构化报表，如资产负债表
+└── 用户数据（Users）          # 用户信息、权限、余额
 ```
 
-**响应示例**：
+### 2.2 财务指标字典
 
-```json
-{
-  "metrics": [
-    {
-      "standard_name": "NET_PROFIT",
-      "display_name": "净利润",
-      "category": "盈利能力",
-      "unit": "万元",
-      "description": "扣除所有成本、税费后的利润总额",
-      "synonyms": ["纯利润", "税后利润", "利润总额"],
-      "formula": "营业收入 - 营业成本 - 税费"
-    },
-    {
-      "standard_name": "NET_INTEREST_INCOME",
-      "display_name": "净利息收入",
-      "category": "盈利能力",
-      "unit": "万元",
-      "description": "利息收入减去利息支出",
-      "synonyms": ["利息收入", "息差收入", "净利息"],
-      "formula": "利息收入 - 利息支出"
-    }
-  ],
-  "dimensions": [
-    {"name": "year", "display_name": "年份", "type": "int"},
-    {"name": "quarter", "display_name": "季度", "type": "int", "range": "1-4"},
-    {"name": "month", "display_name": "月份", "type": "int", "range": "1-12"},
-    {"name": "granularity", "display_name": "聚合粒度", "type": "enum", "values": ["yearly", "quarterly", "monthly"]}
-  ]
-}
-```
-
-### 2.3 查询端点
-
-**请求示例**：
-
-```bash
-GET /api/finance/query?metric=NET_PROFIT&year=2025&granularity=yearly
-X-User-ID: 000000001
-```
-
-**参数说明**：
-
-| 参数 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| `metric` | str | ✅ | 指标名，必须是字典中的 `standard_name` |
-| `year` | int | ❌ | 年份，不指定则返回最近数据 |
-| `quarter` | int | ❌ | 季度（1-4），指定后按季度查询 |
-| `month` | int | ❌ | 月份（1-12），指定后按月查询 |
-| `granularity` | str | ❌ | 聚合粒度：yearly/quarterly/monthly，默认 yearly |
-
-**响应示例**：
-
-```json
-{
-  "metric": "NET_PROFIT",
-  "metric_name": "净利润",
-  "unit": "万元",
-  "branch_id": "BR001",
-  "granularity": "yearly",
-  "data": [
-    {"period": "2025", "value": 125000.0},
-    {"period": "2024", "value": 112000.0},
-    {"period": "2023", "value": 98000.0}
-  ],
-  "query_time": "2026-05-27T01:45:39.142574+00:00"
-}
-```
-
-### 2.4 后台 API 核心代码
-
-```python
-# backend_api/main.py
-
-from fastapi import FastAPI, HTTPException, Header
-from .config.dictionary import FINANCE_DICTIONARY, ALLOWED_METRICS
-
-app = FastAPI(title="财务后台 API")
-
-# 用户-机构映射（RLS）
-USER_BRANCH_MAPPING = {
-    "000000001": "BR001",
-    "000000002": "BR001",
-    "000000003": "BR002",
-}
-
-
-@app.get("/api/finance/dictionary")
-async def get_finance_dictionary():
-    """获取财务指标元数据字典（静态返回）"""
-    return FINANCE_DICTIONARY
-
-
-@app.get("/api/finance/query")
-async def query_finance_metrics(
-    metric: str,
-    year: int = None,
-    quarter: int = None,
-    month: int = None,
-    granularity: str = "yearly",
-    x_user_id: str = Header(None, alias="X-User-ID")
-):
-    """
-    查询财务指标数据
-
-    安全措施：白名单验证 + RLS 行级安全 + 参数化查询
-    """
-    # 1. 验证用户编号
-    if not x_user_id or not x_user_id.isdigit() or len(x_user_id) != 9:
-        raise HTTPException(400, "用户编号格式错误")
-
-    # 2. 白名单验证
-    if metric not in ALLOWED_METRICS:
-        raise HTTPException(400, f"不支持的指标: {metric}")
-
-    # 3. 参数范围验证
-    if quarter and not (1 <= quarter <= 4):
-        raise HTTPException(400, "季度参数范围: 1-4")
-    if month and not (1 <= month <= 12):
-        raise HTTPException(400, "月份参数范围: 1-12")
-
-    # 4. RLS：获取机构代码
-    branch_id = USER_BRANCH_MAPPING.get(x_user_id, "BR000")
-
-    # 5. 执行参数化查询（强制过滤 branch_id）
-    results = await execute_finance_query(metric, branch_id, year, quarter, month)
-
-    return {
-        "metric": metric,
-        "branch_id": branch_id,
-        "data": results
-    }
-```
-
-### 2.5 用户信息端点
-
-```python
-@app.get("/api/users/me")
-async def get_my_info(x_user_id: str = Header(None, alias="X-User-ID")):
-    """获取当前用户完整信息"""
-    user = USERS_DB.get(x_user_id)
-    if not user:
-        raise HTTPException(404, "用户不存在")
-    return user
-
-
-@app.get("/api/users/balance")
-async def get_my_balance(x_user_id: str = Header(None, alias="X-User-ID")):
-    """获取当前用户账户余额（精简返回）"""
-    user = USERS_DB.get(x_user_id)
-    if not user:
-        raise HTTPException(404, "用户不存在")
-    return {
-        "user_id": user["user_id"],
-        "name": user["name"],
-        "balance": user["balance"]
-    }
-```
-
-### 2.6 管理员端点
-
-```python
-from functools import wraps
-
-def require_admin(func):
-    """管理员权限装饰器"""
-    @wraps(func)
-    async def wrapper(*args, x_user_id: str = Header(None, alias="X-User-ID"), **kwargs):
-        user = USERS_DB.get(x_user_id)
-        if not user or user.get("role") != "admin":
-            raise HTTPException(403, "需要管理员权限")
-        return await func(*args, x_user_id=x_user_id, **kwargs)
-    return wrapper
-
-
-@app.get("/api/admin/users")
-@require_admin
-async def list_all_users(x_user_id: str = Header(None, alias="X-User-ID")):
-    """
-    【管理员权限】查询所有用户列表
-
-    不包含 balance 字段，保护用户财务隐私
-    """
-    return {
-        "total": len(USERS_DB),
-        "users": [
-            {
-                "user_id": u["user_id"],
-                "name": u["name"],
-                "department": u["department"],
-                "role": u["role"]
-            }
-            for u in USERS_DB.values()
-        ]
-    }
-```
-
----
-
-## 3. 财务指标字典
-
-### 3.1 字典结构
+财务指标字典是系统的核心元数据，用于：
+- AI 语义匹配（用户输入 → 标准指标名）
+- API 白名单验证
+- 查询参数校验
 
 ```python
 # backend_api/config/dictionary.py
@@ -375,7 +169,7 @@ FINANCE_DICTIONARY = {
 ALLOWED_METRICS = {m["standard_name"] for m in FINANCE_DICTIONARY["metrics"]}
 ```
 
-### 3.2 字段说明
+### 2.3 字段说明
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -387,23 +181,250 @@ ALLOWED_METRICS = {m["standard_name"] for m in FINANCE_DICTIONARY["metrics"]}
 | `synonyms` | list | 同义词/别名列表（用于语义匹配） |
 | `formula` | str | 计算公式 |
 
+### 2.4 用户数据模型
+
+```python
+# 用户-机构映射（RLS）
+USER_BRANCH_MAPPING = {
+    "000000001": "BR001",
+    "000000002": "BR001",
+    "000000003": "BR002",
+}
+
+# 用户数据
+USERS_DB = {
+    "000000001": {
+        "user_id": "000000001",
+        "name": "张三",
+        "department": "财务部",
+        "role": "admin",
+        "balance": 100000.00
+    },
+    # ...
+}
+```
+
+---
+
+## 3. 后台 API 设计
+
+### 3.1 API 端点总览
+
+| 分类 | 端点 | 方法 | 说明 | 权限 |
+|------|------|------|------|------|
+| **字典** | `/api/finance/dictionary` | GET | 获取财务指标元数据字典 | 所有用户 |
+| **指标查询** | `/api/finance/query` | GET | 查询财务指标数据 | 所有用户（RLS） |
+| **用户信息** | `/api/users/me` | GET | 获取当前用户信息 | 所有用户 |
+| **用户余额** | `/api/users/balance` | GET | 获取当前用户余额 | 所有用户 |
+| **管理员** | `/api/admin/users` | GET | 查询所有用户列表 | 仅管理员 |
+
+### 3.2 字典端点
+
+**请求**：
+
+```bash
+GET /api/finance/dictionary
+```
+
+**响应**：
+
+```json
+{
+  "metrics": [
+    {
+      "standard_name": "NET_PROFIT",
+      "display_name": "净利润",
+      "category": "盈利能力",
+      "unit": "万元",
+      "description": "扣除所有成本、税费后的利润总额",
+      "synonyms": ["纯利润", "税后利润", "利润总额"],
+      "formula": "营业收入 - 营业成本 - 税费"
+    }
+  ],
+  "dimensions": [
+    {"name": "year", "display_name": "年份", "type": "int"},
+    {"name": "quarter", "display_name": "季度", "type": "int", "range": "1-4"}
+  ]
+}
+```
+
+### 3.3 指标查询端点
+
+**请求**：
+
+```bash
+GET /api/finance/query?metric=NET_PROFIT&year=2025&granularity=yearly
+X-User-ID: 000000001
+```
+
+**参数说明**：
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `metric` | str | ✅ | 指标名，必须是字典中的 `standard_name` |
+| `year` | int | ❌ | 年份，不指定则返回最近数据 |
+| `quarter` | int | ❌ | 季度（1-4），指定后按季度查询 |
+| `month` | int | ❌ | 月份（1-12），指定后按月查询 |
+| `granularity` | str | ❌ | 聚合粒度：yearly/quarterly/monthly，默认 yearly |
+
+**响应**：
+
+```json
+{
+  "metric": "NET_PROFIT",
+  "metric_name": "净利润",
+  "unit": "万元",
+  "branch_id": "BR001",
+  "granularity": "yearly",
+  "data": [
+    {"period": "2025", "value": 125000.0},
+    {"period": "2024", "value": 112000.0},
+    {"period": "2023", "value": 98000.0}
+  ],
+  "query_time": "2026-05-27T01:45:39.142574+00:00"
+}
+```
+
+### 3.4 核心代码实现
+
+```python
+# backend_api/main.py
+
+from fastapi import FastAPI, HTTPException, Header
+from .config.dictionary import FINANCE_DICTIONARY, ALLOWED_METRICS
+
+app = FastAPI(title="财务后台 API")
+
+
+# ==================== 字典端点 ====================
+
+@app.get("/api/finance/dictionary")
+async def get_finance_dictionary():
+    """获取财务指标元数据字典（静态返回）"""
+    return FINANCE_DICTIONARY
+
+
+# ==================== 指标查询端点 ====================
+
+@app.get("/api/finance/query")
+async def query_finance_metrics(
+    metric: str,
+    year: int = None,
+    quarter: int = None,
+    month: int = None,
+    granularity: str = "yearly",
+    x_user_id: str = Header(None, alias="X-User-ID")
+):
+    """
+    查询财务指标数据
+
+    安全措施：白名单验证 + RLS 行级安全 + 参数化查询
+    """
+    # 1. 验证用户编号
+    if not x_user_id or not x_user_id.isdigit() or len(x_user_id) != 9:
+        raise HTTPException(400, "用户编号格式错误")
+
+    # 2. 白名单验证
+    if metric not in ALLOWED_METRICS:
+        raise HTTPException(400, f"不支持的指标: {metric}")
+
+    # 3. 参数范围验证
+    if quarter and not (1 <= quarter <= 4):
+        raise HTTPException(400, "季度参数范围: 1-4")
+    if month and not (1 <= month <= 12):
+        raise HTTPException(400, "月份参数范围: 1-12")
+
+    # 4. RLS：获取机构代码
+    branch_id = USER_BRANCH_MAPPING.get(x_user_id, "BR000")
+
+    # 5. 执行参数化查询（强制过滤 branch_id）
+    results = await execute_finance_query(metric, branch_id, year, quarter, month)
+
+    return {
+        "metric": metric,
+        "branch_id": branch_id,
+        "data": results
+    }
+
+
+# ==================== 用户信息端点 ====================
+
+@app.get("/api/users/me")
+async def get_my_info(x_user_id: str = Header(None, alias="X-User-ID")):
+    """获取当前用户完整信息"""
+    user = USERS_DB.get(x_user_id)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    return user
+
+
+@app.get("/api/users/balance")
+async def get_my_balance(x_user_id: str = Header(None, alias="X-User-ID")):
+    """获取当前用户账户余额（精简返回）"""
+    user = USERS_DB.get(x_user_id)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    return {
+        "user_id": user["user_id"],
+        "name": user["name"],
+        "balance": user["balance"]
+    }
+
+
+# ==================== 管理员端点 ====================
+
+from functools import wraps
+
+def require_admin(func):
+    """管理员权限装饰器"""
+    @wraps(func)
+    async def wrapper(*args, x_user_id: str = Header(None, alias="X-User-ID"), **kwargs):
+        user = USERS_DB.get(x_user_id)
+        if not user or user.get("role") != "admin":
+            raise HTTPException(403, "需要管理员权限")
+        return await func(*args, x_user_id=x_user_id, **kwargs)
+    return wrapper
+
+
+@app.get("/api/admin/users")
+@require_admin
+async def list_all_users(x_user_id: str = Header(None, alias="X-User-ID")):
+    """
+    【管理员权限】查询所有用户列表
+
+    不包含 balance 字段，保护用户财务隐私
+    """
+    return {
+        "total": len(USERS_DB),
+        "users": [
+            {
+                "user_id": u["user_id"],
+                "name": u["name"],
+                "department": u["department"],
+                "role": u["role"]
+            }
+            for u in USERS_DB.values()
+        ]
+    }
+```
+
 ---
 
 ## 4. MCP 工具定义
 
 ### 4.1 工具清单
 
-| 工具名 | 用途 | 权限 |
-|--------|------|------|
-| `get_finance_dictionary` | 获取财务指标字典 | 所有用户 |
-| `query_financial_metrics` | 查询财务指标数据 | 所有用户（RLS） |
-| `get_my_info` | 获取当前用户完整信息 | 所有用户 |
-| `get_my_balance` | 获取当前用户余额 | 所有用户 |
-| `get_my_department` | 获取当前用户部门 | 所有用户 |
-| `check_my_permission` | 查询当前用户权限 | 所有用户 |
-| `list_all_users` | 查询所有用户列表 | 仅管理员 |
+| 分类 | 工具名 | 用途 | 权限 |
+|------|--------|------|------|
+| **字典** | `get_finance_dictionary` | 获取财务指标字典 | 所有用户 |
+| **指标查询** | `query_financial_metrics` | 查询财务指标数据 | 所有用户（RLS） |
+| **用户信息** | `get_my_info` | 获取当前用户完整信息 | 所有用户 |
+| **用户余额** | `get_my_balance` | 获取当前用户余额 | 所有用户 |
+| **用户部门** | `get_my_department` | 获取当前用户部门 | 所有用户 |
+| **权限查询** | `check_my_permission` | 查询当前用户权限 | 所有用户 |
+| **管理员** | `list_all_users` | 查询所有用户列表 | 仅管理员 |
 
-### 4.2 核心工具代码
+### 4.2 核心工具实现
 
 ```python
 # mcp_remote/main.py
@@ -414,6 +435,8 @@ from mcp.server.fastmcp import FastMCP
 current_user_id: ContextVar[str] = ContextVar("current_user_id")
 mcp = FastMCP("FinanceService")
 
+
+# ==================== 字典工具 ====================
 
 @mcp.tool()
 async def get_finance_dictionary() -> dict:
@@ -442,6 +465,8 @@ async def get_finance_dictionary() -> dict:
         )
         return response.json()
 
+
+# ==================== 指标查询工具 ====================
 
 @mcp.tool()
 async def query_financial_metrics(
@@ -507,11 +532,10 @@ async def query_financial_metrics(
             headers={"X-User-ID": user_id}
         )
         return response.json()
-```
 
-### 4.3 用户信息工具
 
-```python
+# ==================== 用户信息工具 ====================
+
 @mcp.tool()
 async def get_my_info() -> dict:
     """
@@ -615,11 +639,10 @@ async def check_my_permission() -> dict:
             headers={"X-User-ID": user_id}
         )
         return response.json()
-```
 
-### 4.4 管理员工具
 
-```python
+# ==================== 管理员工具 ====================
+
 @mcp.tool()
 async def list_all_users() -> dict:
     """
@@ -777,31 +800,20 @@ curl -X POST http://localhost:8001/mcp \
 
 ---
 
-## 7. Skill 固化查询 SOP
+## 7. 设计指南
 
-### 7.1 问题背景
+### 7.1 Skill 固化查询 SOP
 
-AI Agent 的系统提示词由厂商控制，用户无法自定义，导致：
+AI Agent 的系统提示词由厂商控制，用户无法自定义。通过 Claude Code 的 **Skill 机制**，将财务查询的 SOP 固化到 SKILL.md 文档中。
 
-| 问题 | 说明 |
-|------|------|
-| 查询流程不可控 | Agent 可能跳过字典查询直接调用查询工具 |
-| 错误处理不一致 | 无法统一引导 Agent 进行友好的异常提示 |
-
-### 7.2 解决方案
-
-通过 Claude Code 的 **Skill 机制**，将财务查询的 SOP 固化到 SKILL.md 文档中。
-
-**核心理念**：Skill 只需 SKILL.md 文档固化流程，无需编写 Python 脚本。
-
-### 7.3 目录结构
+**目录结构**：
 
 ```
 .claude/skills/finance-query/
 └── SKILL.md                    # 唯一必需文件
 ```
 
-### 7.4 SKILL.md 内容
+**SKILL.md 内容**：
 
 ```markdown
 # 财务数据查询 Skill
@@ -860,245 +872,134 @@ AI Agent 的系统提示词由厂商控制，用户无法自定义，导致：
 - 查询结果仅显示当前用户所属机构的数据
 ```
 
-### 7.5 Skill 与 MCP 工具分层
+### 7.2 大宽表/数据仓库工具设计
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Skill 层（业务编排）                                            │
-│  finance-query Skill (SKILL.md)                                 │
-│  • 接收用户自然语言输入                                          │
-│  • 指引 Claude Code 调用 MCP 工具                               │
-│  • 本地语义匹配和结果格式化                                      │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ 调用
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  MCP 工具层（原子能力）                                          │
-│  get_finance_dictionary()   query_financial_metrics()          │
-│  • 获取指标字典              • 执行参数化查询                    │
-│  • 纯数据返回                • RLS 安全过滤                      │
-└─────────────────────────────────────────────────────────────────┘
-```
+数据仓库大宽表通常包含**大量字段**（50-100+ 列），设计要点：
 
----
+| 挑战 | 解决方案 |
+|------|----------|
+| 字段过多 | 按业务域拆分工具，而非按字段 |
+| 查询维度多样 | 提供元数据工具（list_tables、describe_table） |
+| 聚合需求 | 提供专门的聚合查询工具 |
+| 模型认知负担 | 用示例代替完整枚举 |
 
-## 8. 大宽表/数据仓库工具设计
-
-### 8.1 核心挑战
-
-数据仓库大宽表通常包含**大量字段**（50-100+ 列），与简单业务场景不同：
-
-| 挑战 | 说明 |
-|------|------|
-| **字段过多** | 不可能为每个字段创建单独工具 |
-| **查询维度多样** | 用户可能按时间、部门、地区、产品等多维度查询 |
-| **聚合需求** | 用户可能需要汇总、统计、排名 |
-| **模型认知负担** | 工具描述太长会超出上下文，太短则覆盖不全 |
-
-### 8.2 推荐方案：按业务域拆分工具
-
-**不要为每个字段创建工具**，而是按业务域/查询场景拆分：
-
-```python
-# ❌ 错误：每个字段一个工具（字段太多）
-@mcp.tool()
-async def get_sales_amount() -> dict: ...
-@mcp.tool()
-async def get_sales_quantity() -> dict: ...
-# ... 50+ 个工具
-
-# ✅ 正确：按业务域拆分
-@mcp.tool()
-async def query_sales_summary(
-    dimension: str,      # 维度：region/product/time
-    metrics: list[str],  # 指标：amount/quantity/profit
-    filters: dict        # 筛选条件
-) -> dict:
-    """
-    查询销售汇总数据。
-
-    当用户询问"销售额"、"销量"、"销售统计"、"按地区/产品销售"时调用。
-
-    支持维度：
-    - region: 按地区
-    - product: 按产品
-    - time: 按时间（日/月/年）
-
-    支持指标：
-    - amount: 销售金额
-    - quantity: 销售数量
-    - profit: 利润
-
-    示例：
-    - "各地区的销售额" → dimension="region", metrics=["amount"]
-    - "各产品的销量和利润" → dimension="product", metrics=["quantity", "profit"]
-    """
-```
-
-### 8.3 元数据工具设计
-
-提供**动态获取字段信息**的工具，而非在描述中静态枚举所有字段：
-
-```python
-@mcp.tool()
-async def list_tables() -> dict:
-    """
-    获取数据仓库可用表列表。
-
-    当用户不确定有哪些数据表时调用。
-    返回表名、描述、字段数量。
-    """
-    pass
-
-
-@mcp.tool()
-async def describe_table(table: str) -> dict:
-    """
-    获取表的字段元数据。
-
-    当用户需要了解表结构时调用。
-    返回字段名、类型、描述、是否可筛选、是否可分组。
-
-    示例返回：
-    {
-        "table": "sales_fact",
-        "fields": [
-            {"name": "sales_amount", "type": "decimal", "desc": "销售金额", "filterable": true},
-            {"name": "quantity", "type": "int", "desc": "销售数量", "filterable": true},
-            {"name": "region", "type": "string", "desc": "地区", "groupable": true}
-        ]
-    }
-    """
-    pass
-```
-
-### 8.4 示例驱动的描述
-
-大宽表字段多，**用示例代替完整枚举**：
-
-```python
-@mcp.tool()
-async def query_sales_data(
-    metrics: list[str],
-    dimensions: list[str] = None,
-    filters: dict = None
-) -> dict:
-    """
-    查询销售数据。
-
-    当用户询问销售相关问题时调用。
-
-    常用查询场景示例：
-    ┌─────────────────────────────────────────────────────────────┐
-    │ 用户问题                        │ 参数设置                    │
-    ├─────────────────────────────────────────────────────────────┤
-    │ "各地区销售额"                  │ metrics=["sales_amount"],   │
-    │                                 │ dimensions=["region"]       │
-    ├─────────────────────────────────────────────────────────────┤
-    │ "2024年各产品销量和利润"         │ metrics=["quantity","profit"]│
-    │                                 │ dimensions=["product"],     │
-    │                                 │ filters={"year": 2024}      │
-    ├─────────────────────────────────────────────────────────────┤
-    │ "华东区最近一个月各渠道销售"      │ metrics=["sales_amount"],   │
-    │                                 │ dimensions=["channel"],     │
-    │                                 │ filters={"region": "华东",  │
-    │                                 │          "month": "latest"} │
-    └─────────────────────────────────────────────────────────────┘
-
-    完整字段列表请调用 describe_table("sales_fact") 获取。
-    """
-```
-
-### 8.5 分页和性能说明
-
-大宽表查询可能返回大量数据，**必须在描述中说明分页机制**：
-
-```python
-@mcp.tool()
-async def query_fact_table(
-    table: str,
-    select_fields: list[str],
-    filters: dict = None,
-    limit: int = 100,    # 默认限制
-    offset: int = 0
-) -> dict:
-    """
-    查询数据仓库事实表。
-
-    返回数据限制：
-    - 默认返回前 100 行
-    - 最大 1000 行（limit 参数上限）
-    - 如需更多数据，使用 offset 分页
-    - 查询超时时间：30 秒
-
-    返回格式：
-    {
-        "data": [...],           # 数据行
-        "total": 5000,           # 总行数
-        "limit": 100,            # 当前限制
-        "offset": 0,             # 当前偏移
-        "has_more": true         # 是否有更多数据
-    }
-    """
-```
-
-### 8.6 聚合查询工具
-
-提供专门的聚合查询工具，避免返回大量明细数据：
-
-```python
-@mcp.tool()
-async def query_aggregation(
-    table: str,
-    metric: str,
-    aggregation: str,  # sum, avg, max, min, count
-    dimensions: list[str] = None,
-    filters: dict = None
-) -> dict:
-    """
-    查询数据仓库聚合结果。
-
-    当用户需要查询汇总值时调用，如"总销售额"、"平均利润"。
-
-    支持的聚合函数：
-    - sum: 求和
-    - avg: 平均值
-    - max: 最大值
-    - min: 最小值
-    - count: 计数
-
-    示例：
-    - "总销售额是多少" → metric="sales_amount", aggregation="sum"
-    - "平均利润率" → metric="margin", aggregation="avg"
-    - "各地区的总销售额" → metric="sales_amount", aggregation="sum", dimensions=["region"]
-    """
-    pass
-```
-
-### 8.7 大宽表工具设计模式
-
-推荐的工具组合：
+**推荐工具组合**：
 
 | 工具类型 | 工具名称 | 用途 |
 |----------|----------|------|
-| **元数据查询** | `list_tables` | 获取可用表列表 |
-| **元数据查询** | `describe_table` | 获取表字段元数据 |
-| **明细查询** | `query_fact_table` | 查询明细数据（带分页） |
-| **汇总查询** | `query_metrics` | 按维度汇总指标 |
-| **聚合查询** | `query_aggregation` | 单值聚合（sum/avg/max/min） |
+| 元数据查询 | `list_tables` | 获取可用表列表 |
+| 元数据查询 | `describe_table` | 获取表字段元数据 |
+| 明细查询 | `query_fact_table` | 查询明细数据（带分页） |
+| 汇总查询 | `query_metrics` | 按维度汇总指标 |
+| 聚合查询 | `query_aggregation` | 单值聚合（sum/avg/max/min） |
 
-### 8.8 大宽表工具描述检查清单
+**详细设计见**：[MCP 工具描述最佳实践](mcp_tool_description_best_practices.md) 第 13 章
 
-| # | 检查项 | 是否通过 |
-|---|--------|----------|
-| 1 | 是否按业务域拆分工具，而非按字段？ | ☐ |
-| 2 | 是否提供了 `list_tables` / `describe_table` 元数据工具？ | ☐ |
-| 3 | 是否用示例说明参数用法，而非完整枚举字段？ | ☐ |
-| 4 | 是否说明了分页机制和返回行数限制？ | ☐ |
-| 5 | 是否说明了查询超时时间？ | ☐ |
-| 6 | 是否标注了只读/可写权限？ | ☐ |
-| 7 | 是否提供了常见查询场景示例？ | ☐ |
-| 8 | 参数是否支持灵活筛选（而非固定字段）？ | ☐ |
+---
+
+## 8. 实施计划
+
+### 8.1 第一阶段：三大财务报表
+
+MVP 第一阶段将实现三大财务报表（资产负债表、利润表、现金流量表）的查询功能。
+
+#### 8.1.1 报表特点分析
+
+| 报表 | 特点 | 典型字段数 | 查询场景 |
+|------|------|-----------|----------|
+| **资产负债表** | 时点数据，结构化强 | 50-100 项 | 查某日/某月末的资产、负债、所有者权益 |
+| **利润表** | 期间数据，需对比 | 30-50 项 | 查某季/某年的收入、成本、利润 |
+| **现金流量表** | 期间数据，三类活动 | 40-60 项 | 查经营/投资/筹资现金流 |
+
+#### 8.1.2 设计方案
+
+**推荐方案**：为每个报表创建独立工具，而非统一查询工具。
+
+**理由**：
+- 用户意图清晰（"查资产负债表"直接匹配对应工具）
+- 每个报表的参数语义不同（时点 vs 期间）
+- 符合财务人员的认知习惯
+
+#### 8.1.3 新增 API 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/finance/balance-sheet` | GET | 查询资产负债表 |
+| `/api/finance/income-statement` | GET | 查询利润表 |
+| `/api/finance/cash-flow-statement` | GET | 查询现金流量表 |
+| `/api/finance/report-items` | GET | 获取报表科目列表 |
+
+#### 8.1.4 新增 MCP 工具
+
+| 工具名 | 用途 | 关键参数 |
+|--------|------|----------|
+| `get_balance_sheet` | 资产负债表 | `as_of_date`（截止日期） |
+| `get_income_statement` | 利润表 | `year`, `quarter`, `compare_with`（同比/环比） |
+| `get_cash_flow_statement` | 现金流量表 | `year`, `quarter`, `activity_type`（活动类型） |
+| `get_finance_report_items` | 报表科目元数据 | `report_type` |
+
+#### 8.1.5 数据库表结构
+
+```sql
+-- 资产负债表
+CREATE TABLE balance_sheet (
+    id SERIAL PRIMARY KEY,
+    branch_id VARCHAR(10) NOT NULL,
+    as_of_date DATE NOT NULL,
+    item_name VARCHAR(100) NOT NULL,
+    item_value DECIMAL(18,2),
+    category VARCHAR(50) NOT NULL,       -- 资产/负债/所有者权益
+    sub_category VARCHAR(50),
+    display_order INT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 利润表
+CREATE TABLE income_statement (
+    id SERIAL PRIMARY KEY,
+    branch_id VARCHAR(10) NOT NULL,
+    year INT NOT NULL,
+    quarter INT,
+    item_name VARCHAR(100) NOT NULL,
+    item_value DECIMAL(18,2),
+    category VARCHAR(50) NOT NULL,       -- 营业收入/营业成本/利润
+    display_order INT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 现金流量表
+CREATE TABLE cash_flow_statement (
+    id SERIAL PRIMARY KEY,
+    branch_id VARCHAR(10) NOT NULL,
+    year INT NOT NULL,
+    quarter INT,
+    item_name VARCHAR(100) NOT NULL,
+    item_value DECIMAL(18,2),
+    activity_type VARCHAR(20) NOT NULL,  -- operating/investing/financing
+    display_order INT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 索引
+CREATE INDEX idx_balance_sheet_branch_date ON balance_sheet(branch_id, as_of_date);
+CREATE INDEX idx_income_statement_branch_year ON income_statement(branch_id, year, quarter);
+CREATE INDEX idx_cash_flow_branch_year ON cash_flow_statement(branch_id, year, quarter);
+```
+
+#### 8.1.6 实施检查清单
+
+| # | 检查项 | 状态 |
+|---|--------|------|
+| 1 | 后台 API：资产负债表端点 | 📝 |
+| 2 | 后台 API：利润表端点 | 📝 |
+| 3 | 后台 API：现金流量表端点 | 📝 |
+| 4 | 后台 API：报表科目端点 | 📝 |
+| 5 | MCP 工具：get_balance_sheet | 📝 |
+| 6 | MCP 工具：get_income_statement | 📝 |
+| 7 | MCP 工具：get_cash_flow_statement | 📝 |
+| 8 | MCP 工具：get_finance_report_items | 📝 |
+| 9 | 字典扩展：reports 部分 | 📝 |
+| 10 | 数据库表创建与数据导入 | 📝 |
 
 ---
 
