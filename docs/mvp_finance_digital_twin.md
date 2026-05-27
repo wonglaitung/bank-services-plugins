@@ -66,7 +66,58 @@
 └── 用户数据（Users）          # 用户信息、权限、余额
 ```
 
-### 2.2 财务指标字典
+### 2.2 数据流
+
+财务指标查询的完整请求流程：
+
+```
+1. 用户提问
+   │  "去年的净利润是多少？"
+   ▼
+2. AI 语义匹配
+   │  调用 get_finance_dictionary 获取字典
+   │  在 synonyms 中匹配："净利润" → NET_PROFIT
+   │  提取时间维度："去年" → year=2025
+   ▼
+3. MCP 工具调用
+   │  query_financial_metrics(metric="NET_PROFIT", year=2025)
+   │
+   │  本地代理自动注入加密 Token（含 user_id）
+   │  POST /mcp → 远端 MCP 服务
+   ▼
+4. 远端 MCP 服务
+   │  解密 Token → 提取 user_id="000000001"
+   │  注入 ContextVar: current_user_id
+   │  调用后台 API
+   ▼
+5. 后台 API
+   │  GET /api/finance/query?metric=NET_PROFIT&year=2025
+   │  Header: X-User-ID: 000000001
+   │
+   │  白名单验证 ✓
+   │  RLS 过滤：branch_id=BR001
+   │  执行参数化查询
+   ▼
+6. 数据返回
+   │  {
+   │    "metric": "NET_PROFIT",
+   │    "data": [{"period": "2025", "value": 125000.0}]
+   │  }
+   ▼
+7. AI 格式化输出
+      📊 2025年净利润：125,000 万元
+```
+
+**关键节点说明**：
+
+| 步骤 | 关键操作 | 安全措施 |
+|------|----------|----------|
+| 2 | 语义匹配（synonyms） | 字典白名单 |
+| 3 | Token 自动注入 | 本地代理无法解密 |
+| 4 | Token 解密验证 | AES-256-GCM + 有效期 |
+| 5 | RLS 行级安全 | 强制过滤 branch_id |
+
+### 2.3 财务指标字典
 
 财务指标字典是系统的核心元数据，用于：
 - AI 语义匹配（用户输入 → 标准指标名）
@@ -169,7 +220,7 @@ FINANCE_DICTIONARY = {
 ALLOWED_METRICS = {m["standard_name"] for m in FINANCE_DICTIONARY["metrics"]}
 ```
 
-### 2.3 字段说明
+### 2.4 字段说明
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -181,7 +232,7 @@ ALLOWED_METRICS = {m["standard_name"] for m in FINANCE_DICTIONARY["metrics"]}
 | `synonyms` | list | 同义词/别名列表（用于语义匹配） |
 | `formula` | str | 计算公式 |
 
-### 2.4 用户数据模型
+### 2.5 用户数据模型
 
 ```python
 # 用户-机构映射（RLS）
