@@ -39,7 +39,16 @@ GET /api/finance/dictionary
       "unit": "万元",
       "description": "扣除所有成本、税费后的利润总额",
       "synonyms": ["纯利润", "税后利润", "利润总额", "净利润"],
-      "formula": "营业收入 - 业成本 - 税费"
+      "formula": "营业收入 - 营业成本 - 税费"
+    },
+    {
+      "standard_name": "NET_INTEREST_INCOME",
+      "display_name": "净利息收入",
+      "category": "盈利能力",
+      "unit": "万元",
+      "description": "利息收入减去利息支出",
+      "synonyms": ["利息收入", "息差收入", "净利息"],
+      "formula": "利息收入 - 利息支出"
     },
     {
       "standard_name": "TOTAL_ASSETS",
@@ -49,6 +58,51 @@ GET /api/finance/dictionary
       "description": "银行全部资产的总和",
       "synonyms": ["总资产", "资产负债表资产", "资产规模"],
       "formula": "各项资产之和"
+    },
+    {
+      "standard_name": "TOTAL_LIABILITIES",
+      "display_name": "负债总额",
+      "category": "规模指标",
+      "unit": "万元",
+      "description": "银行全部负债的总和",
+      "synonyms": ["总负债", "负债规模"],
+      "formula": "各项负债之和"
+    },
+    {
+      "standard_name": "NPL_RATIO",
+      "display_name": "不良贷款率",
+      "category": "风险指标",
+      "unit": "%",
+      "description": "不良贷款余额占贷款总额的比例",
+      "synonyms": ["不良率", "不良贷款率", "NPL"],
+      "formula": "不良贷款余额 / 贷款总额 × 100%"
+    },
+    {
+      "standard_name": "CAR_RATIO",
+      "display_name": "资本充足率",
+      "category": "风险指标",
+      "unit": "%",
+      "description": "资本总额与加权风险资产的比例",
+      "synonyms": ["资本充足率", "CAR"],
+      "formula": "资本总额 / 风险加权资产 × 100%"
+    },
+    {
+      "standard_name": "LOAN_BALANCE",
+      "display_name": "贷款余额",
+      "category": "业务指标",
+      "unit": "万元",
+      "description": "各项贷款的期末余额",
+      "synonyms": ["贷款总额", "贷款规模"],
+      "formula": "各项贷款之和"
+    },
+    {
+      "standard_name": "DEPOSIT_BALANCE",
+      "display_name": "存款余额",
+      "category": "业务指标",
+      "unit": "万元",
+      "description": "各项存款的期末余额",
+      "synonyms": ["存款总额", "存款规模"],
+      "formula": "各项存款之和"
     }
   ],
   "dimensions": [
@@ -255,6 +309,56 @@ ALLOWED_METRICS = {
 ALLOWED_GRANULARITY = {"yearly", "quarterly", "monthly"}
 ```
 
+### 动态 SQL 拼接实现
+
+SQL 根据参数动态构建，**WHERE 条件按需添加**，值始终参数化绑定。
+
+```python
+def build_query(metric: str, branch_id: str, year: int = None,
+                quarter: int = None, month: int = None,
+                granularity: str = "yearly") -> tuple[str, list]:
+    """
+    动态构建 SQL 查询
+
+    Returns:
+        (sql, params): SQL 语句和参数列表
+    """
+    # 基础 SQL（branch_id 始终作为 RLS 条件）
+    sql = "SELECT period, value FROM finance_metrics WHERE branch_id = %s"
+    params = [branch_id]
+
+    # 白名单字段直接拼接到 SQL（安全，已通过白名单验证）
+    sql += " AND metric = %s"
+    params.append(metric)
+
+    sql += " AND granularity = %s"
+    params.append(granularity)
+
+    # 年份条件
+    if year is not None:
+        sql += " AND period LIKE %s"
+        params.append(f"{year}%")
+
+    # 指定季度（季度粒度时）
+    if quarter is not None and granularity == "quarterly":
+        sql = sql.replace("AND period LIKE %s", "AND period = %s")
+        params[-1] = f"{year}-Q{quarter}"
+
+    # 指定月份（月度粒度时）
+    if month is not None and granularity == "monthly":
+        sql = sql.replace("AND period LIKE %s", "AND period = %s")
+        params[-1] = f"{year}-{month:02d}"
+
+    # 排序和限制
+    if year is None:
+        # 不指定年份时，返回最近数据
+        sql += " ORDER BY period DESC LIMIT 3"
+    else:
+        sql += " ORDER BY period"
+
+    return sql, params
+```
+
 ### SQL 模板示例
 
 假设数据存储在 `finance_metrics` 表中，结构如下：
@@ -274,49 +378,104 @@ CREATE TABLE finance_metrics (
 
 **请求参数：** `metric=TOTAL_ASSETS&year=2026&granularity=yearly`
 
-**SQL：**
+**动态拼接过程：**
+```python
+# 初始 SQL
+sql = "SELECT period, value FROM finance_metrics WHERE branch_id = %s"
+params = ["BR001"]
+
+# 添加 metric（白名单验证后）
+sql += " AND metric = %s"
+params.append("TOTAL_ASSETS")
+
+# 添加 granularity（白名单验证后）
+sql += " AND granularity = %s"
+params.append("yearly")
+
+# 添加年份条件
+sql += " AND period LIKE %s"
+params.append("2026%")
+
+# 添加排序
+sql += " ORDER BY period"
+```
+
+**最终 SQL：**
 ```sql
-SELECT period, value
-FROM finance_metrics
-WHERE branch_id = %s          -- RLS: 系统注入
-  AND metric = %s             -- 白名单验证
-  AND granularity = %s        -- 白名单验证
-  AND period = %s;            -- 参数化
+SELECT period, value FROM finance_metrics
+WHERE branch_id = %s
+  AND metric = %s
+  AND granularity = %s
+  AND period LIKE %s
+ORDER BY period;
 ```
 
 **参数绑定：**
 ```python
-params = ["BR001", "TOTAL_ASSETS", "yearly", "2026"]
+params = ["BR001", "TOTAL_ASSETS", "yearly", "2026%"]
 ```
 
 #### 场景 2：季度数据查询
 
 **请求参数：** `metric=NPL_RATIO&year=2026&granularity=quarterly`
 
-**SQL：**
+**动态拼接过程：**
+```python
+sql = "SELECT period, value FROM finance_metrics WHERE branch_id = %s"
+params = ["BR001"]
+
+sql += " AND metric = %s"
+params.append("NPL_RATIO")
+
+sql += " AND granularity = %s"
+params.append("quarterly")
+
+sql += " AND period LIKE %s"
+params.append("2026%")
+
+sql += " ORDER BY period"
+```
+
+**最终 SQL：**
 ```sql
-SELECT period, value
-FROM finance_metrics
+SELECT period, value FROM finance_metrics
 WHERE branch_id = %s
   AND metric = %s
   AND granularity = %s
-  AND period LIKE %s          -- 模糊匹配年度前缀
+  AND period LIKE %s
 ORDER BY period;
 ```
 
 **参数绑定：**
 ```python
-params = ["BR001", "NPL_RATIO", "quarterly", "2026-Q%"]
+params = ["BR001", "NPL_RATIO", "quarterly", "2026%"]
 ```
+
+**查询结果：** 返回 2026-Q1、2026-Q2 等季度数据
 
 #### 场景 3：指定季度查询
 
 **请求参数：** `metric=NPL_RATIO&year=2026&quarter=1&granularity=quarterly`
 
-**SQL：**
+**动态拼接过程：**
+```python
+sql = "SELECT period, value FROM finance_metrics WHERE branch_id = %s"
+params = ["BR001"]
+
+sql += " AND metric = %s"
+params.append("NPL_RATIO")
+
+sql += " AND granularity = %s"
+params.append("quarterly")
+
+# 指定季度：替换 LIKE 为精确匹配
+sql += " AND period = %s"
+params.append("2026-Q1")
+```
+
+**最终 SQL：**
 ```sql
-SELECT period, value
-FROM finance_metrics
+SELECT period, value FROM finance_metrics
 WHERE branch_id = %s
   AND metric = %s
   AND granularity = %s
@@ -332,10 +491,25 @@ params = ["BR001", "NPL_RATIO", "quarterly", "2026-Q1"]
 
 **请求参数：** `metric=TOTAL_ASSETS&year=2026&month=5&granularity=monthly`
 
-**SQL：**
+**动态拼接过程：**
+```python
+sql = "SELECT period, value FROM finance_metrics WHERE branch_id = %s"
+params = ["BR001"]
+
+sql += " AND metric = %s"
+params.append("TOTAL_ASSETS")
+
+sql += " AND granularity = %s"
+params.append("monthly")
+
+# 指定月份
+sql += " AND period = %s"
+params.append("2026-05")
+```
+
+**最终 SQL：**
 ```sql
-SELECT period, value
-FROM finance_metrics
+SELECT period, value FROM finance_metrics
 WHERE branch_id = %s
   AND metric = %s
   AND granularity = %s
@@ -351,10 +525,24 @@ params = ["BR001", "TOTAL_ASSETS", "monthly", "2026-05"]
 
 **请求参数：** `metric=TOTAL_ASSETS&granularity=yearly`
 
-**SQL：**
+**动态拼接过程：**
+```python
+sql = "SELECT period, value FROM finance_metrics WHERE branch_id = %s"
+params = ["BR001"]
+
+sql += " AND metric = %s"
+params.append("TOTAL_ASSETS")
+
+sql += " AND granularity = %s"
+params.append("yearly")
+
+# 不指定年份：排序取最近3条
+sql += " ORDER BY period DESC LIMIT 3"
+```
+
+**最终 SQL：**
 ```sql
-SELECT period, value
-FROM finance_metrics
+SELECT period, value FROM finance_metrics
 WHERE branch_id = %s
   AND metric = %s
   AND granularity = %s
