@@ -158,52 +158,99 @@ async def fetch_tools_from_remote(token_manager: TokenRefreshManager) -> list[To
     """
     try:
         # 获取有效 Access Token
+        logger.info("[fetch_tools] 开始获取 Access Token...")
         access_token = await token_manager.get_valid_access_token()
+        logger.info(f"[fetch_tools] Access Token 获取成功，长度: {len(access_token) if access_token else 0}")
+
+        request_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        }
+        logger.info(f"[fetch_tools] 发送请求到: {token_manager.remote_url}/mcp")
+        logger.info(f"[fetch_tools] 请求内容: {json.dumps(request_payload, ensure_ascii=False)}")
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{token_manager.remote_url}/mcp",
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/list"
-                },
+                json=request_payload,
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json"
                 }
             )
 
+            logger.info(f"[fetch_tools] 响应状态码: {response.status_code}")
+            logger.info(f"[fetch_tools] 响应 Headers: {dict(response.headers)}")
+
+            # 记录原始响应内容（截断长内容）
+            raw_text = response.text
+            if len(raw_text) > 500:
+                logger.info(f"[fetch_tools] 响应内容（前500字符）: {raw_text[:500]}...")
+            else:
+                logger.info(f"[fetch_tools] 响应内容: {raw_text}")
+
             if response.status_code != 200:
-                logger.error(f"获取工具列表失败: HTTP {response.status_code}")
+                logger.error(f"[fetch_tools] 获取工具列表失败: HTTP {response.status_code}")
                 return []
 
             data = response.json()
+            logger.info(f"[fetch_tools] 解析 JSON 成功，keys: {list(data.keys())}")
+
             if "error" in data:
-                logger.error(f"远端返回错误: {data['error']}")
+                error_info = data["error"]
+                logger.error(f"[fetch_tools] 远端返回错误: {error_info}")
+                logger.error(f"[fetch_tools] 错误类型: {type(error_info)}, 错误内容: {json.dumps(error_info, ensure_ascii=False)}")
                 return []
 
-            tools_data = data.get("result", {}).get("tools", [])
-            logger.info(f"从远端获取 {len(tools_data)} 个工具")
+            result = data.get("result", {})
+            logger.info(f"[fetch_tools] result keys: {list(result.keys()) if isinstance(result, dict) else '非字典类型'}")
+
+            tools_data = result.get("tools", [])
+            logger.info(f"[fetch_tools] 从远端获取 {len(tools_data)} 个工具")
+
+            if len(tools_data) == 0:
+                logger.warning("[fetch_tools] 工具列表为空！检查远端服务是否正确注册了工具")
+                logger.warning(f"[fetch_tools] 完整 result 内容: {json.dumps(result, ensure_ascii=False)}")
 
             # 转换为 Tool 对象
             tools = []
             for t in tools_data:
                 try:
+                    # 记录每个工具的原始数据
+                    logger.info(f"[fetch_tools] 处理工具: {t.get('name')}")
+                    logger.info(f"[fetch_tools] 工具原始数据 keys: {list(t.keys())}")
+
                     # 移除多余的字段，只保留 Tool 需要的字段
                     tool_dict = {
                         "name": t.get("name"),
                         "description": t.get("description"),
                         "inputSchema": t.get("inputSchema", {"type": "object", "properties": {}})
                     }
-                    tools.append(Tool(**tool_dict))
-                except Exception as e:
-                    logger.warning(f"转换工具失败: {t.get('name')}, {e}")
+                    logger.info(f"[fetch_tools] 转换后的工具数据: {json.dumps(tool_dict, ensure_ascii=False, indent=2)}")
 
+                    tool = Tool(**tool_dict)
+                    tools.append(tool)
+                    logger.info(f"[fetch_tools] 工具 {t.get('name')} 转换成功")
+                except Exception as e:
+                    logger.warning(f"[fetch_tools] 转换工具失败: {t.get('name')}, 错误: {e}")
+                    logger.warning(f"[fetch_tools] 失败工具的原始数据: {json.dumps(t, ensure_ascii=False)}")
+
+            logger.info(f"[fetch_tools] 最终成功转换 {len(tools)} 个工具")
             return tools
 
+    except httpx.ConnectError as e:
+        logger.error(f"[fetch_tools] 无法连接远端服务: {e}")
+        logger.error(f"[fetch_tools] 目标地址: {token_manager.remote_url}")
+        return []
+    except json.JSONDecodeError as e:
+        logger.error(f"[fetch_tools] 解析响应失败: {e}")
+        logger.error(f"[fetch_tools] 响应内容可能不是有效 JSON")
+        return []
     except Exception as e:
-        logger.error(f"获取工具列表异常: {e}")
+        logger.error(f"[fetch_tools] 获取工具列表异常: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(f"[fetch_tools] 异常堆栈:\n{traceback.format_exc()}")
         return []
 
 
@@ -284,11 +331,23 @@ async def run_server():
     # 创建 Token 管理器
     token_manager = TokenRefreshManager(remote_url)
 
-    logger.info(f"MCP 代理启动，目标: {remote_url}")
+    logger.info(f"[run_server] MCP 代理启动，目标: {remote_url}")
 
     # 预加载工具列表
+    logger.info("[run_server] ========== 预加载工具列表 ==========")
     remote_tools = await fetch_tools_from_remote(token_manager)
-    logger.info(f"已加载 {len(remote_tools)} 个工具")
+    logger.info(f"[run_server] 已加载 {len(remote_tools)} 个工具")
+    if len(remote_tools) == 0:
+        logger.error("[run_server] ⚠️ 预加载工具列表为空！请检查远端服务状态")
+        logger.error("[run_server] 可能原因:")
+        logger.error("[run_server]   1. 远端服务未启动")
+        logger.error("[run_server]   2. 远端服务未注册任何工具")
+        logger.error("[run_server]   3. Token 无效或已过期")
+        logger.error("[run_server]   4. 网络连接问题")
+    else:
+        for tool in remote_tools:
+            logger.info(f"[run_server] 预加载工具: {tool.name}")
+    logger.info("[run_server] ========== 预加载完成 ==========")
 
     # 创建 MCP Server 实例
     server = Server("finance-proxy")
@@ -297,8 +356,17 @@ async def run_server():
     @server.list_tools()
     async def list_tools():
         """返回远端工具列表"""
+        logger.info("[list_tools] ========== list_tools 被调用 ==========")
+        logger.info("[list_tools] 开始从远端获取工具列表...")
         # 每次调用时重新获取工具列表（支持动态更新）
         tools = await fetch_tools_from_remote(token_manager)
+        logger.info(f"[list_tools] 获取到 {len(tools)} 个工具")
+        if len(tools) == 0:
+            logger.warning("[list_tools] 返回空列表！这可能导致 agent 无法找到任何工具")
+        else:
+            for tool in tools:
+                logger.info(f"[list_tools] 返回工具: {tool.name}")
+        logger.info("[list_tools] ========== list_tools 返回完成 ==========")
         return tools
 
     # 注册 call_tool 处理器
@@ -311,13 +379,18 @@ async def run_server():
 
     # 使用 stdio_server 创建传输层
     async with stdio_server() as (read_stream, write_stream):
-        logger.info("MCP 服务器已启动，等待连接...")
+        logger.info("[run_server] ========== MCP 服务器启动 ==========")
+        logger.info("[run_server] stdio 传输层已创建")
+        logger.info("[run_server] 等待 Claude Code 连接...")
 
         # 获取初始化选项
         init_options = server.create_initialization_options()
+        logger.info(f"[run_server] 初始化选项: {init_options}")
 
         # 运行服务器
+        logger.info("[run_server] 开始运行 MCP 协议循环...")
         await server.run(read_stream, write_stream, init_options)
+        logger.info("[run_server] MCP 服务器已停止")
 
 
 def main():
