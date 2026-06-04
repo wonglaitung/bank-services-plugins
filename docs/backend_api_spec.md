@@ -157,6 +157,227 @@ GET /api/finance/query
 
 ---
 
+## RLS 行级安全实现
+
+### 设计原则
+
+RLS（Row-Level Security）确保用户只能查询所属机构的数据，**核心原则：机构代码由系统注入，不接受用户参数**。
+
+### 实现机制
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        请求处理流程                              │
+├─────────────────────────────────────────────────────────────────┤
+│  1. 远端 MCP 服务解密 Token，提取 user_id                        │
+│  2. 通过 X-User-ID Header 传递给后台 API                         │
+│  3. 后台 API 查 USER_BRANCH_MAPPING 获取 branch_id               │
+│  4. branch_id 作为查询条件强制注入，用户无法覆盖                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 用户-机构映射配置
+
+```python
+# config/dictionary.py
+USER_BRANCH_MAPPING = {
+    "000000001": "BR001",  # 张三 -> 某分行
+    "000000002": "BR001",  # 李四 -> 某分行
+    "000000003": "BR002",  # 王五 -> 另一分行
+    "000000004": "BR001",  # 赵六 -> 某分行
+    "000000005": "BR002",  # 钱七 -> 另一分行
+}
+```
+
+### 代码实现
+
+```python
+# main.py
+@app.get("/api/finance/query")
+async def query_finance_metrics(
+    metric: str,
+    year: Optional[int] = None,
+    quarter: Optional[int] = None,
+    month: Optional[int] = None,
+    granularity: str = "yearly",
+    x_user_id: str = Header(None, alias="X-User-ID")  # 从 Header 获取
+):
+    # 1. 验证用户编号格式
+    if not x_user_id or not x_user_id.isdigit() or len(x_user_id) != 9:
+        raise HTTPException(400, "用户编号格式错误")
+
+    # 2. 白名单验证（防止 SQL 注入）
+    if metric not in ALLOWED_METRICS:
+        raise HTTPException(400, f"不支持的指标: {metric}")
+
+    # 3. RLS：系统注入 branch_id（用户无法控制）
+    branch_id = USER_BRANCH_MAPPING.get(x_user_id, "BR000")
+
+    # 4. 执行查询，branch_id 作为强制过滤条件
+    data = get_simulated_data(
+        metric=metric,
+        branch_id=branch_id,  # 系统注入，非用户输入
+        year=year,
+        quarter=quarter,
+        month=month,
+        granularity=granularity
+    )
+    ...
+```
+
+### 安全特性
+
+| 特性 | 说明 |
+|------|------|
+| **参数隔离** | API 不接受 branch_id 参数，完全杜绝用户伪造 |
+| **映射表控制** | 机构归属由后台配置，用户无法篡改 |
+| **默认拒绝** | 未配置映射的用户返回空数据或默认机构 |
+
+---
+
+## SQL 查询拼接逻辑
+
+### 参数化查询原则
+
+**所有用户输入必须参数化，禁止字符串拼接 SQL**。
+
+### 白名单验证
+
+用户输入的 `metric`、`granularity` 必须在白名单内：
+
+```python
+ALLOWED_METRICS = {
+    "NET_PROFIT", "NET_INTEREST_INCOME", "TOTAL_ASSETS",
+    "TOTAL_LIABILITIES", "NPL_RATIO", "CAR_RATIO",
+    "LOAN_BALANCE", "DEPOSIT_BALANCE"
+}
+
+ALLOWED_GRANULARITY = {"yearly", "quarterly", "monthly"}
+```
+
+### SQL 模板示例
+
+假设数据存储在 `finance_metrics` 表中，结构如下：
+
+```sql
+CREATE TABLE finance_metrics (
+    branch_id VARCHAR(10) NOT NULL,
+    metric VARCHAR(50) NOT NULL,
+    period VARCHAR(10) NOT NULL,      -- 格式: '2026' 或 '2026-Q1' 或 '2026-05'
+    granularity VARCHAR(10) NOT NULL, -- yearly/quarterly/monthly
+    value DECIMAL(18,2),
+    PRIMARY KEY (branch_id, metric, period, granularity)
+);
+```
+
+#### 场景 1：年度汇总查询
+
+**请求参数：** `metric=TOTAL_ASSETS&year=2026&granularity=yearly`
+
+**SQL：**
+```sql
+SELECT period, value
+FROM finance_metrics
+WHERE branch_id = %s          -- RLS: 系统注入
+  AND metric = %s             -- 白名单验证
+  AND granularity = %s        -- 白名单验证
+  AND period = %s;            -- 参数化
+```
+
+**参数绑定：**
+```python
+params = ["BR001", "TOTAL_ASSETS", "yearly", "2026"]
+```
+
+#### 场景 2：季度数据查询
+
+**请求参数：** `metric=NPL_RATIO&year=2026&granularity=quarterly`
+
+**SQL：**
+```sql
+SELECT period, value
+FROM finance_metrics
+WHERE branch_id = %s
+  AND metric = %s
+  AND granularity = %s
+  AND period LIKE %s          -- 模糊匹配年度前缀
+ORDER BY period;
+```
+
+**参数绑定：**
+```python
+params = ["BR001", "NPL_RATIO", "quarterly", "2026-Q%"]
+```
+
+#### 场景 3：指定季度查询
+
+**请求参数：** `metric=NPL_RATIO&year=2026&quarter=1&granularity=quarterly`
+
+**SQL：**
+```sql
+SELECT period, value
+FROM finance_metrics
+WHERE branch_id = %s
+  AND metric = %s
+  AND granularity = %s
+  AND period = %s;
+```
+
+**参数绑定：**
+```python
+params = ["BR001", "NPL_RATIO", "quarterly", "2026-Q1"]
+```
+
+#### 场景 4：月度数据查询
+
+**请求参数：** `metric=TOTAL_ASSETS&year=2026&month=5&granularity=monthly`
+
+**SQL：**
+```sql
+SELECT period, value
+FROM finance_metrics
+WHERE branch_id = %s
+  AND metric = %s
+  AND granularity = %s
+  AND period = %s;
+```
+
+**参数绑定：**
+```python
+params = ["BR001", "TOTAL_ASSETS", "monthly", "2026-05"]
+```
+
+#### 场景 5：不指定年份，返回最近数据
+
+**请求参数：** `metric=TOTAL_ASSETS&granularity=yearly`
+
+**SQL：**
+```sql
+SELECT period, value
+FROM finance_metrics
+WHERE branch_id = %s
+  AND metric = %s
+  AND granularity = %s
+ORDER BY period DESC
+LIMIT 3;
+```
+
+**参数绑定：**
+```python
+params = ["BR001", "TOTAL_ASSETS", "yearly"]
+```
+
+### 安全检查清单
+
+| 检查项 | 实现方式 |
+|--------|----------|
+| SQL 注入防护 | 参数化查询 + 白名单验证 |
+| IDOR 防护 | branch_id 由系统注入，不接受用户参数 |
+| 越权访问 | RLS 映射表强制过滤机构数据 |
+| 非法参数 | 范围校验（quarter: 1-4, month: 1-12） |
+
+---
+
 ## 数据范围
 
 **支持的年份：** 2023-2026
