@@ -372,6 +372,12 @@ CREATE TABLE finance_metrics (
     value DECIMAL(18,2),
     PRIMARY KEY (branch_id, metric, period, granularity)
 );
+
+-- 示例数据
+INSERT INTO finance_metrics VALUES
+('BR001', 'TOTAL_ASSETS', '2026',      'yearly',   10500000.00),
+('BR001', 'TOTAL_ASSETS', '2026-Q1',   'quarterly', 10000000.00),
+('BR001', 'TOTAL_ASSETS', '2026-05',   'monthly',  10200000.00);
 ```
 
 #### 场景 1：年度汇总查询
