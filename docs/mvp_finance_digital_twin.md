@@ -51,7 +51,7 @@
 | `local_proxy/main.py` | ✅ 直接复用 | Token 自动刷新逻辑 |
 | `mcp_remote/main.py` | ✅ 扩展复用 | 新增财务工具定义 |
 | `backend_api/main.py` | 🔄 重构 | 新增财务 API 路由 |
-| Token 生成工具 | ✅ 直接复用 | AES-256-GCM 加密 |
+| Token 生成工具 | ✅ 直接复用 | RSA-OAEP 加密 |
 
 ---
 
@@ -114,7 +114,7 @@
 |------|----------|----------|
 | 2 | 语义匹配（synonyms） | 字典白名单 |
 | 3 | Token 自动注入 | 本地代理无法解密 |
-| 4 | Token 解密验证 | AES-256-GCM + 有效期 |
+| 4 | Token 解密验证 | RSA-OAEP + 有效期 |
 | 5 | RLS 行级安全 | 强制过滤 branch_id |
 
 ### 2.3 财务指标字典
@@ -532,7 +532,7 @@ async def query_financial_metrics(
 
 | 安全措施 | 实现位置 | 说明 |
 |----------|----------|------|
-| **Token 加密** | 远端 MCP 服务 | AES-256-GCM 加密，本地代理无法解密 |
+| **Token 加密** | 远端 MCP 服务 | RSA-OAEP 加密，本地代理无法解密 |
 | **IDOR 防护** | MCP 工具层 | user_id 从 Token 提取，不接受参数 |
 | **白名单验证** | 后台 API | 只允许字典中定义的指标 |
 | **RLS 行级安全** | 后台 API | 强制过滤 branch_id |
@@ -606,13 +606,13 @@ prototype/
 |--------|------|------|
 | `MCP_REFRESH_TOKEN` | Refresh Token | 本地代理 |
 | `REMOTE_MCP_URL` | 远端 MCP 地址 | 本地代理 |
-| `TOKEN_KEY` | AES-256 密钥（Base64） | 远端服务 |
+| `RSA_PRIVATE_KEY` | RSA 私钥（PEM 格式） | 远端服务 |
 | `BACKEND_API_URL` | 后台 API 地址 | 远端服务 |
 
 ### 6.4 Token 生成
 
 ```bash
-# 生成密钥（首次使用）
+# 生成 RSA 密钥对（首次使用）
 python prototype/tools/generate_token.py --generate-key
 
 # 生成 Token（Refresh Token 有效 7 天）
@@ -626,7 +626,8 @@ python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
 python prototype/backend_api/main.py
 
 # 2. 启动远端 MCP 服务 (端口 8001)
-TOKEN_KEY=$(base64 -w 0 prototype/tools/.token_key) python prototype/mcp_remote/main.py
+export RSA_PRIVATE_KEY="$(cat prototype/tools/private_key.pem)"
+python prototype/mcp_remote/main.py
 
 # 3. 重启 Claude Code（本地代理自动启动）
 ```

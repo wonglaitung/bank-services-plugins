@@ -1009,12 +1009,13 @@ Authorization: Bearer <Access Token>
 Token 分为两种类型，都在服务器端生成：
 
 ```python
-import os
 import json
 import base64
 import secrets
 from datetime import datetime, timezone, timedelta
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.backends import default_backend
 
 # Token 类型
 TOKEN_TYPE_ACCESS = "access"
@@ -1024,15 +1025,15 @@ TOKEN_TYPE_REFRESH = "refresh"
 ACCESS_TOKEN_EXPIRES_MINUTES = 15
 
 
-def generate_token(user_id: str, token_type: str, expires_at: datetime, key: bytes) -> tuple:
+def generate_token(user_id: str, token_type: str, expires_at: datetime, public_key) -> tuple:
     """
-    生成加密 Token
+    生成 RSA 加密 Token
 
     Args:
         user_id: 用户编号（9位数字）
         token_type: Token 类型 (access/refresh)
         expires_at: 过期时间
-        key: AES-256 密钥（32 bytes）
+        public_key: RSA 公钥
 
     Returns:
         (Base64 编码的加密 Token, jti)
@@ -1048,25 +1049,28 @@ def generate_token(user_id: str, token_type: str, expires_at: datetime, key: byt
         "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")
     }
 
-    # AES-GCM 加密
-    aesgcm = AESGCM(key)
-    nonce = os.urandom(12)
+    # RSA-OAEP 加密
     plaintext = json.dumps(token_data).encode('utf-8')
-    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+    ciphertext = public_key.encrypt(
+        plaintext,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
 
-    # 组装并 Base64 编码
-    encrypted = nonce + ciphertext
-    return base64.b64encode(encrypted).decode('utf-8'), jti
+    return base64.b64encode(ciphertext).decode('utf-8'), jti
 
 
-def generate_token_pair(user_id: str, refresh_expires_days: int, key: bytes) -> dict:
+def generate_token_pair(user_id: str, refresh_expires_days: int, public_key) -> dict:
     """
     生成 Access Token + Refresh Token 对
 
     Args:
         user_id: 用户编号（9位数字）
         refresh_expires_days: Refresh Token 有效期（天）
-        key: AES-256 密钥（32 bytes）
+        public_key: RSA 公钥
 
     Returns:
         包含 refresh_token 和 refresh_jti 的字典
@@ -1075,11 +1079,11 @@ def generate_token_pair(user_id: str, refresh_expires_days: int, key: bytes) -> 
 
     # Access Token（15 分钟有效）
     access_expires = now + timedelta(minutes=ACCESS_TOKEN_EXPIRES_MINUTES)
-    access_token, access_jti = generate_token(user_id, TOKEN_TYPE_ACCESS, access_expires, key)
+    access_token, access_jti = generate_token(user_id, TOKEN_TYPE_ACCESS, access_expires, public_key)
 
     # Refresh Token（可配置天数）
     refresh_expires = now + timedelta(days=refresh_expires_days)
-    refresh_token, refresh_jti = generate_token(user_id, TOKEN_TYPE_REFRESH, refresh_expires, key)
+    refresh_token, refresh_jti = generate_token(user_id, TOKEN_TYPE_REFRESH, refresh_expires, public_key)
 
     return {
         "access_token": access_token,
@@ -1102,16 +1106,17 @@ python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
 import base64
 import json
 from datetime import datetime, timezone
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
 from fastapi import Request, HTTPException
 
-def decrypt_token(token_b64: str, key: bytes) -> dict:
+def decrypt_token(token_b64: str, private_key) -> dict:
     """
     解密 Token 获取用户身份
 
     Args:
         token_b64: Base64 编码的加密 Token
-        key: AES-256 密钥（32 bytes）
+        private_key: RSA 私钥
 
     Returns:
         包含 user_id, token_type, jti, expires_at 的字典
@@ -1121,26 +1126,26 @@ def decrypt_token(token_b64: str, key: bytes) -> dict:
     """
     try:
         # 1. Base64 解码
-        encrypted = base64.b64decode(token_b64)
+        ciphertext = base64.b64decode(token_b64)
 
-        # 2. 解析 nonce 和 ciphertext
-        if len(encrypted) < 12:
-            raise ValueError("Token 格式错误")
-        nonce = encrypted[:12]
-        ciphertext_with_tag = encrypted[12:]
+        # 2. RSA-OAEP 解密
+        plaintext = private_key.decrypt(
+            ciphertext,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
 
-        # 3. AES-GCM 解密
-        aesgcm = AESGCM(key)
-        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
-
-        # 4. 解析 JSON
+        # 3. 解析 JSON
         token_data = json.loads(plaintext.decode('utf-8'))
 
-        # 5. 验证必要字段
+        # 4. 验证必要字段
         if 'user_id' not in token_data or 'expires_at' not in token_data:
             raise ValueError("Token 缺少必要字段")
 
-        # 6. 验证有效期
+        # 5. 验证有效期
         expires_at_str = token_data['expires_at']
         expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
         if datetime.now(timezone.utc) > expires_at:
@@ -1262,7 +1267,7 @@ async def refresh_token(request: Request):
         raise HTTPException(400, "缺少 refresh_token")
 
     # 验证 Refresh Token
-    token_data = decrypt_token(refresh_token, TOKEN_KEY)
+    token_data = decrypt_token(refresh_token, RSA_PRIVATE_KEY)
 
     if token_data.get("token_type") != TOKEN_TYPE_REFRESH:
         raise HTTPException(401, "需要 Refresh Token")
@@ -1371,8 +1376,8 @@ curl -X POST http://localhost:8001/auth/revoke \
    Token = "伪造的Token"
 
 2. 解密失败:
-   - Token 使用 AES-256-GCM 加密
-   - 没有密钥无法解密
+   - Token 使用 RSA-OAEP 加密
+   - 没有私钥无法解密
    - 解密失败返回 401
 
 3. 黑客尝试重放过期 Token:
@@ -1413,7 +1418,9 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 try:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.backends import default_backend
 except ImportError:
     print("错误: 需要安装 cryptography 库")
     sys.exit(1)
@@ -1434,14 +1441,32 @@ app = FastAPI(title="MCP 远端服务")
 # 配置
 BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8000")
 
-# Token 加密密钥（从环境变量读取）
-_TOKEN_KEY_B64 = os.environ.get("TOKEN_KEY")
-if _TOKEN_KEY_B64:
-    TOKEN_KEY = base64.b64decode(_TOKEN_KEY_B64)
-else:
-    # 原型测试时使用固定密钥（生产环境必须从环境变量读取）
-    TOKEN_KEY = b'prototype-test-key-32-bytes-!!!!'  # 32 bytes
-    logger.warning("使用测试密钥，生产环境请设置 TOKEN_KEY 环境变量")
+# RSA 密钥（从环境变量读取）
+def load_rsa_keys():
+    """加载 RSA 密钥对"""
+    private_key = None
+    public_key = None
+
+    # 加载私钥
+    env_private = os.environ.get("RSA_PRIVATE_KEY")
+    if env_private:
+        private_key = serialization.load_pem_private_key(
+            env_private.encode('utf-8'),
+            password=None,
+            backend=default_backend()
+        )
+
+    # 加载公钥
+    env_public = os.environ.get("RSA_PUBLIC_KEY")
+    if env_public:
+        public_key = serialization.load_pem_public_key(
+            env_public.encode('utf-8'),
+            backend=default_backend()
+        )
+
+    return private_key, public_key
+
+RSA_PRIVATE_KEY, RSA_PUBLIC_KEY = load_rsa_keys()
 
 
 # ==================== Token 解密 ====================
@@ -1449,13 +1474,15 @@ else:
 def decrypt_token(token_b64: str) -> dict:
     """解密 Token 获取用户身份"""
     try:
-        encrypted = base64.b64decode(token_b64)
-        if len(encrypted) < 12:
-            raise ValueError("Token 格式错误")
-        nonce = encrypted[:12]
-        ciphertext_with_tag = encrypted[12:]
-        aesgcm = AESGCM(TOKEN_KEY)
-        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
+        ciphertext = base64.b64decode(token_b64)
+        plaintext = RSA_PRIVATE_KEY.decrypt(
+            ciphertext,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
         token_data = json.loads(plaintext.decode('utf-8'))
         if 'user_id' not in token_data or 'expires_at' not in token_data:
             raise ValueError("Token 缺少必要字段")
@@ -1695,7 +1722,7 @@ else:
 | **Token 盗用** | Access Token 15 分钟有效期，风险窗口小 | Token 有效期 |
 | **Token 泄露** | Refresh Token 支持吊销，可立即止损 | 吊销黑名单 |
 | **Token 重放** | Token 包含有效期，过期自动失效 | 有效期验证 |
-| **Token 伪造** | AES-256-GCM 加密，无密钥无法伪造 | Token 加密 |
+| **Token 伪造** | RSA-OAEP 加密，无私钥无法伪造 | Token 加密 |
 
 ### 11.2 IDOR 防御机制
 

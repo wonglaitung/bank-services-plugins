@@ -239,7 +239,7 @@
 
             <g id="box-token-key">
                 <rect class="artifact-box" x="660" y="15" width="160" height="28" rx="4" style="stroke: var(--danger); color: var(--danger);" />
-                <text class="artifact-text" x="740" y="32" text-anchor="middle" fill="var(--danger)">🔑 TOKEN_KEY (AES-256) [仅服务端]</text>
+                <text class="artifact-text" x="740" y="32" text-anchor="middle" fill="var(--danger)">🔑 RSA 私钥 [仅服务端]</text>
             </g>
             <path class="callout-line" d="M 740 43 L 730 60" style="stroke: var(--danger);" />
         </svg>
@@ -289,7 +289,7 @@
                     <ul>
                         <li><code>MCP_REFRESH_TOKEN</code> 持久化存储在 <code>.mcp.json</code> 中。</li>
                         <li><code>Access Token</code> 仅驻留在 Proxy 内存中，过期前自动刷新。</li>
-                        <li><code>TOKEN_KEY</code> 仅存在于远端服务器，本地不解密。</li>
+                        <li><code>RSA 私钥</code> 仅存在于远端服务器，本地不解密。</li>
                     </ul>
                 </div>
             </div>
@@ -468,7 +468,7 @@
                 }
 
                 highlightArtifact('box-token-key', true);
-                addLog('Remote', '🔑 使用 TOKEN_KEY 解密 Token (AES-256-GCM)');
+                addLog('Remote', '🔑 使用 RSA 私钥解密 Token (RSA-OAEP)');
                 await sleep(500);
                 highlightArtifact('box-token-key', false);
                 addLog('Remote', '提取 user_id=000000001, expires_at > now', 'success');

@@ -589,8 +589,8 @@ params = ["BR001", "TOTAL_ASSETS", "yearly"]
 ## 启动服务
 
 ```bash
-# 设置密钥环境变量
-export TOKEN_KEY=<密钥>
+# 设置 RSA 私钥环境变量
+export RSA_PRIVATE_KEY="$(cat prototype/tools/private_key.pem)"
 
 # 启动后台 API（端口 8000）
 python prototype/backend_api/main.py

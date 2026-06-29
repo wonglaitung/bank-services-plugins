@@ -57,11 +57,14 @@ prototype/
 ```bash
 cd prototype
 
-# 生成密钥（首次使用）
+# 生成 RSA 密钥对（首次使用）
 python tools/generate_token.py --generate-key
 
-# 查看密钥（配置到远端服务环境变量）
-python tools/generate_token.py --show-key
+# 查看公钥（用于本地代理）
+python tools/generate_token.py --show-public-key
+
+# 查看私钥（用于远端服务）
+python tools/generate_token.py --show-private-key
 
 # 生成 Token 对（Refresh Token 有效 7 天）
 python tools/generate_token.py --user-id 000000001 --refresh-expires 7
@@ -71,14 +74,12 @@ python tools/generate_token.py --user-id 000000001 --refresh-expires 7
 ### 2. 启动服务
 
 ```bash
-# 配置密钥环境变量
-export TOKEN_KEY="<上一步 show-key 输出的密钥>"
-
-# 方式一：使用启动脚本（推荐）
+# 方式一：使用启动脚本（推荐，自动加载密钥）
 ./start_all.sh
 
 # 方式二：手动启动
 python backend_api/main.py &      # 端口 8000
+export RSA_PRIVATE_KEY="$(cat tools/private_key.pem)"
 python mcp_remote/main.py &       # 端口 8001
 ```
 
@@ -202,7 +203,8 @@ python mcp_remote/main.py &       # 端口 8001
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `BACKEND_API_URL` | 后台 API 地址 | `http://localhost:8000` |
-| `TOKEN_KEY` | AES-256 密钥（Base64） | 测试密钥 |
+| `RSA_PRIVATE_KEY` | RSA 私钥（PEM 格式） | 从文件加载 |
+| `RSA_PUBLIC_KEY` | RSA 公钥（PEM 格式） | 从文件加载 |
 
 ### API 端点
 

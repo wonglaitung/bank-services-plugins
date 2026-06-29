@@ -32,7 +32,9 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 try:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.backends import default_backend
 except ImportError:
     print("错误: 需要安装 cryptography 库")
     print("运行: pip install cryptography")
@@ -82,14 +84,60 @@ def secure_api_call(func):
 # 配置
 BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8000")
 
-# Token 加密密钥（从环境变量读取）
-_TOKEN_KEY_B64 = os.environ.get("TOKEN_KEY")
-if _TOKEN_KEY_B64:
-    TOKEN_KEY = base64.b64decode(_TOKEN_KEY_B64)
-else:
-    # 原型测试时使用固定密钥（生产环境必须从环境变量读取）
-    TOKEN_KEY = b'prototype-test-key-32-bytes-!!!!'  # 32 bytes
-    logger.warning("使用测试密钥，生产环境请设置 TOKEN_KEY 环境变量")
+# RSA 密钥（从环境变量读取）
+def load_rsa_keys():
+    """加载 RSA 密钥对"""
+    private_key = None
+    public_key = None
+
+    # 加载私钥
+    env_private = os.environ.get("RSA_PRIVATE_KEY")
+    if env_private:
+        private_key = serialization.load_pem_private_key(
+            env_private.encode('utf-8'),
+            password=None,
+            backend=default_backend()
+        )
+    else:
+        # 从文件加载
+        private_key_file = Path(__file__).parent.parent / "tools" / "private_key.pem"
+        if private_key_file.exists():
+            with open(private_key_file, 'rb') as f:
+                private_key = serialization.load_pem_private_key(
+                    f.read(),
+                    password=None,
+                    backend=default_backend()
+                )
+            logger.info(f"从文件加载私钥: {private_key_file}")
+
+    # 加载公钥
+    env_public = os.environ.get("RSA_PUBLIC_KEY")
+    if env_public:
+        public_key = serialization.load_pem_public_key(
+            env_public.encode('utf-8'),
+            backend=default_backend()
+        )
+    else:
+        # 从文件加载
+        public_key_file = Path(__file__).parent.parent / "tools" / "public_key.pem"
+        if public_key_file.exists():
+            with open(public_key_file, 'rb') as f:
+                public_key = serialization.load_pem_public_key(
+                    f.read(),
+                    backend=default_backend()
+                )
+            logger.info(f"从文件加载公钥: {public_key_file}")
+
+    if not private_key:
+        logger.warning("未找到 RSA 私钥，请设置 RSA_PRIVATE_KEY 环境变量或生成密钥对")
+
+    if not public_key:
+        logger.warning("未找到 RSA 公钥，请设置 RSA_PUBLIC_KEY 环境变量或生成密钥对")
+
+    return private_key, public_key
+
+# 全局密钥
+RSA_PRIVATE_KEY, RSA_PUBLIC_KEY = load_rsa_keys()
 
 # Token 类型
 TOKEN_TYPE_ACCESS = "access"
@@ -160,7 +208,7 @@ def update_token_status(jti: str, status: str):
 
 def decrypt_token(token_b64: str) -> dict:
     """
-    解密 Token 获取用户身份
+    用 RSA 私钥解密 Token 获取用户身份
 
     Args:
         token_b64: Base64 编码的加密 Token
@@ -172,27 +220,30 @@ def decrypt_token(token_b64: str) -> dict:
         ValueError: Token 无效或过期
     """
     try:
+        if not RSA_PRIVATE_KEY:
+            raise ValueError("服务未配置 RSA 私钥")
+
         # 1. Base64 解码
-        encrypted = base64.b64decode(token_b64)
+        ciphertext = base64.b64decode(token_b64)
 
-        # 2. 解析 nonce 和 ciphertext
-        if len(encrypted) < 12:
-            raise ValueError("Token 格式错误")
-        nonce = encrypted[:12]
-        ciphertext_with_tag = encrypted[12:]
+        # 2. RSA-OAEP 解密
+        plaintext = RSA_PRIVATE_KEY.decrypt(
+            ciphertext,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
 
-        # 3. AES-GCM 解密
-        aesgcm = AESGCM(TOKEN_KEY)
-        plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
-
-        # 4. 解析 JSON
+        # 3. 解析 JSON
         token_data = json.loads(plaintext.decode('utf-8'))
 
-        # 5. 验证必要字段
+        # 4. 验证必要字段
         if 'user_id' not in token_data or 'expires_at' not in token_data:
             raise ValueError("Token 缺少必要字段")
 
-        # 6. 验证有效期
+        # 5. 验证有效期
         expires_at_str = token_data['expires_at']
         expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
         if datetime.now(timezone.utc) > expires_at:
@@ -210,7 +261,7 @@ def decrypt_token(token_b64: str) -> dict:
 
 def generate_access_token(user_id: str) -> str:
     """
-    生成新的 Access Token
+    用 RSA 公钥生成新的 Access Token
 
     Args:
         user_id: 用户编号
@@ -218,6 +269,9 @@ def generate_access_token(user_id: str) -> str:
     Returns:
         Base64 编码的加密 Token
     """
+    if not RSA_PUBLIC_KEY:
+        raise ValueError("服务未配置 RSA 公钥")
+
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=ACCESS_TOKEN_EXPIRES_MINUTES)
     jti = secrets.token_urlsafe(16)
@@ -230,15 +284,18 @@ def generate_access_token(user_id: str) -> str:
         "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")
     }
 
-    # AES-GCM 加密
-    aesgcm = AESGCM(TOKEN_KEY)
-    nonce = os.urandom(12)
+    # RSA-OAEP 加密
     plaintext = json.dumps(token_data).encode('utf-8')
-    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+    ciphertext = RSA_PUBLIC_KEY.encrypt(
+        plaintext,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
 
-    # 组装并 Base64 编码
-    encrypted = nonce + ciphertext
-    return base64.b64encode(encrypted).decode('utf-8')
+    return base64.b64encode(ciphertext).decode('utf-8')
 
 
 # ==================== 认证端点 ====================

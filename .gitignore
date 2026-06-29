@@ -53,3 +53,7 @@ Thumbs.db
 *.xls
 *.xlsm
 !tests/templates/*.xlsx
+
+# RSA private keys (DO NOT COMMIT)
+prototype/tools/private_key.pem
+*.private.pem

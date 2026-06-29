@@ -176,7 +176,7 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
 输入: 来自本地代理的 HTTPS 请求
 处理:
   1. 从 Authorization Header 提取加密 Token
-  2. AES-256-GCM 解密 Token
+  2. RSA-OAEP 解密 Token
   3. 验证 Token 类型（必须是 Access Token）
   4. 验证有效期（expires_at）
   5. 提取 user_id，验证格式（必须为9位数字）
@@ -245,7 +245,7 @@ Claude Code ◀──Stdio──▶ 本地代理 ◀──HTTPS──▶ 远端 
 3. 远端 MCP 服务接收 (HTTPS)
    │
    │  解密 Token:
-   │  - AES-256-GCM 解密
+   │  - RSA-OAEP 解密
    │  - 提取: user_id = "000000001"
    │  - 提取: expires_at = "2026-05-25T18:00:00Z"
    │  - 验证有效期 ✓
@@ -585,7 +585,7 @@ async def revoke_token(request: Request):
 
 def decrypt_token(token_b64: str) -> dict:
     """解密 Token，返回包含 user_id, token_type, jti, expires_at 的字典"""
-    # AES-GCM 解密逻辑...
+    # RSA-OAEP 解密逻辑...
     return token_data
 
 
@@ -811,14 +811,15 @@ MCP 配置文件位置：
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `BACKEND_API_URL` | 后台 API 地址 | `http://localhost:8000` |
-| `TOKEN_KEY` | AES-256 加密密钥（Base64） | 测试密钥 |
+| `RSA_PRIVATE_KEY` | RSA 私钥（PEM 格式） | 从文件加载 |
+| `RSA_PUBLIC_KEY` | RSA 公钥（PEM 格式） | 从文件加载 |
 
 ### 6.5 Token 生成
 
 使用 `prototype/tools/generate_token.py` 生成 Access Token 和 Refresh Token：
 
 ```bash
-# 生成密钥（首次使用）
+# 生成 RSA 密钥对（首次使用）
 python prototype/tools/generate_token.py --generate-key
 
 # 生成 Token 对（Refresh Token 有效 7 天）
@@ -831,8 +832,9 @@ python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--generate-key` | 生成新的 AES-256 密钥 | - |
-| `--show-key` | 显示当前密钥（Base64） | - |
+| `--generate-key` | 生成新的 RSA-2048 密钥对 | - |
+| `--show-public-key` | 显示当前公钥（PEM 格式） | - |
+| `--show-private-key` | 显示当前私钥（PEM 格式） | - |
 | `--user-id` | 用户编号（9位数字） | 必需 |
 | `--refresh-expires` | Refresh Token 有效期（**天**） | 7 |
 
@@ -874,7 +876,7 @@ cd prototype
 **方式二：手动启动**
 
 ```bash
-# 0. 生成密钥（首次使用）
+# 0. 生成 RSA 密钥对（首次使用）
 python prototype/tools/generate_token.py --generate-key
 
 # 1. 启动后台 API (端口 8000)
@@ -886,8 +888,9 @@ python main.py
 cd prototype/mcp_remote
 pip install -r requirements.txt
 
-# 读取密钥并启动
-TOKEN_KEY=$(base64 -w 0 ../tools/.token_key) TOKEN_KEY=$TOKEN_KEY python main.py
+# 设置 RSA 私钥环境变量并启动
+export RSA_PRIVATE_KEY="$(cat ../tools/private_key.pem)"
+python main.py
 
 # 3. 配置 Claude Code
 # 添加本地代理到 MCP 配置
@@ -929,28 +932,29 @@ Claude Code 会调用 `get_my_info()` 工具，返回：
 
 #### 7.4.1 密钥文件位置
 
-密钥存储在：`prototype/tools/.token_key`
+RSA 密钥对存储在：
+- 私钥：`prototype/tools/private_key.pem`
+- 公钥：`prototype/tools/public_key.pem`
 
 ```bash
-# 查看密钥
-python prototype/tools/generate_token.py --show-key
-# 输出: TOKEN_KEY=6Hd+908eMNP0T/4CmFKxdpkHI3HaMrINtej6VCcpx7Y=
+# 查看公钥
+python prototype/tools/generate_token.py --show-public-key
+
+# 查看私钥
+python prototype/tools/generate_token.py --show-private-key
 ```
 
 #### 7.4.2 密钥生成流程
 
-首次使用时，需要生成密钥：
+首次使用时，需要生成 RSA 密钥对：
 
 ```bash
-# 步骤 1: 生成密钥
+# 步骤 1: 生成 RSA 密钥对
 python prototype/tools/generate_token.py --generate-key
-# 输出: 密钥已保存到 .token_key
+# 输出: 私钥已保存到 private_key.pem
+#       公钥已保存到 public_key.pem
 
-# 步骤 2: 查看生成的密钥
-python prototype/tools/generate_token.py --show-key
-# 输出: TOKEN_KEY=xxx（Base64 编码的 32 字节密钥）
-
-# 步骤 3: 使用密钥生成 Token
+# 步骤 2: 使用密钥生成 Token
 python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
 # 输出: MCP_REFRESH_TOKEN=xxx（Refresh Token）
 ```
@@ -962,7 +966,7 @@ python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
 │                     Token 生成流程                               │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  1. 读取密钥文件 .token_key                                      │
+│  1. 读取 RSA 公钥文件                                            │
 │     └── 若不存在，使用 --generate-key 生成                       │
 │                                                                 │
 │  2. 构造 Token 数据                                              │
@@ -984,10 +988,9 @@ python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
 │           "issued_at": "2026-05-25T10:00:00Z"                    │
 │         }                                                        │
 │                                                                 │
-│  3. AES-256-GCM 加密                                            │
-│     ├── 生成随机 nonce (12 bytes)                               │
-│     ├── 使用密钥加密 JSON → ciphertext + tag                    │
-│     └── 组装: nonce + ciphertext + tag                          │
+│  3. RSA-OAEP 加密                                                │
+│     ├── 使用公钥加密 JSON                                        │
+│     └── 输出: 256 bytes ciphertext                              │
 │                                                                 │
 │  4. Base64 编码                                                  │
 │     └── 输出: MCP_REFRESH_TOKEN=xxx                             │
@@ -1009,27 +1012,23 @@ python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
 │     └── token = header.replace("Bearer ", "")                  │
 │                                                                 │
 │  2. Base64 解码                                                  │
-│     └── encrypted = base64.b64decode(token)                     │
+│     └── ciphertext = base64.b64decode(token)                    │
 │                                                                 │
-│  3. 解析 nonce 和 ciphertext                                     │
-│     ├── nonce = encrypted[:12]                                  │
-│     └── ciphertext_with_tag = encrypted[12:]                    │
+│  3. RSA-OAEP 解密                                                │
+│     ├── 使用 RSA 私钥解密                                        │
+│     └── plaintext = private_key.decrypt(ciphertext, padding)   │
 │                                                                 │
-│  4. AES-256-GCM 解密                                             │
-│     ├── 使用 TOKEN_KEY 解密                                      │
-│     └── plaintext = AESGCM.decrypt(nonce, ciphertext, None)     │
-│                                                                 │
-│  5. 解析 JSON                                                    │
+│  4. 解析 JSON                                                    │
 │     └── token_data = json.loads(plaintext)                      │
 │                                                                 │
-│  6. 验证 Token 类型                                              │
+│  5. 验证 Token 类型                                              │
 │     └── if token_type != "access": raise "需要 Access Token"    │
 │                                                                 │
-│  7. 验证有效期                                                   │
+│  6. 验证有效期                                                   │
 │     ├── expires_at = token_data["expires_at"]                   │
 │     └── if now > expires_at: raise "Token 已过期"               │
 │                                                                 │
-│  8. 返回用户身份                                                  │
+│  7. 返回用户身份                                                  │
 │     └── user_id = token_data["user_id"]                         │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -1037,25 +1036,27 @@ python prototype/tools/generate_token.py --user-id 000000001 --refresh-expires 7
 
 #### 7.4.5 密钥配置对照表
 
-| 组件 | 是否需要密钥 | 配置方式 |
-|------|--------------|----------|
-| `generate_token.py` | ✅ 需要 | 自动读取 `.token_key` 文件 |
-| 本地代理 | ❌ 不需要 | 只转发 Token，不解密 |
-| 远端服务 | ✅ 需要 | 设置 `TOKEN_KEY` 环境变量 |
+| 组件 | 需要的密钥 | 配置方式 |
+|------|------------|----------|
+| `generate_token.py` | 公钥 | 自动读取 `public_key.pem` 文件 |
+| 本地代理 | 无 | 只转发 Token，不解密 |
+| 远端服务 | 私钥 + 公钥 | 设置 `RSA_PRIVATE_KEY` 环境变量或从文件加载 |
 
 ```bash
-# 启动远端服务时设置密钥
-TOKEN_KEY=6Hd+908eMNP0T/4CmFKxdpkHI3HaMrINtej6VCcpx7Y= python prototype/mcp_remote/main.py
+# 启动远端服务时设置私钥
+export RSA_PRIVATE_KEY="$(cat prototype/tools/private_key.pem)"
+python prototype/mcp_remote/main.py
 ```
 
 #### 7.4.6 密钥安全注意事项
 
 | 注意事项 | 说明 |
 |----------|------|
-| **密钥文件权限** | `.token_key` 应设置为 600（仅所有者可读写） |
-| **密钥不要提交** | 添加到 `.gitignore`，避免泄露 |
+| **私钥文件权限** | `private_key.pem` 应设置为 600（仅所有者可读写） |
+| **私钥不要提交** | 添加到 `.gitignore`，避免泄露 |
+| **公钥可分发** | 公钥可以分发到需要生成 Token 的客户端 |
 | **生产环境** | 从安全配置中心或环境变量读取，不使用文件 |
-| **密钥轮换** | 定期更换密钥，重新生成所有 Token |
+| **密钥轮换** | 定期更换密钥对，重新生成所有 Token |
 
 ### 7.4 验证添加工具无需修改代理
 

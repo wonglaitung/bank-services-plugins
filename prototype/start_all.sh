@@ -110,24 +110,23 @@ fi
 echo "  - 启动远端 MCP 服务 (端口 8001)..."
 cd "$SCRIPT_DIR/mcp_remote"
 
-# 读取密钥文件（如果存在）
-TOKEN_KEY_ENV=""
-KEY_FILE="$SCRIPT_DIR/tools/.token_key"
-if [ -f "$KEY_FILE" ]; then
-    TOKEN_KEY_B64=$(base64 -w 0 "$KEY_FILE")
-    TOKEN_KEY_ENV="TOKEN_KEY=$TOKEN_KEY_B64"
-    echo "    使用密钥文件: $KEY_FILE"
+# 读取 RSA 私钥文件（如果存在）
+RSA_KEY_ENV=""
+PRIVATE_KEY_FILE="$SCRIPT_DIR/tools/private_key.pem"
+if [ -f "$PRIVATE_KEY_FILE" ]; then
+    # 读取私钥内容（PEM 格式）
+    PRIVATE_KEY_CONTENT=$(cat "$PRIVATE_KEY_FILE")
+    # 使用临时文件传递多行环境变量
+    RSA_KEY_ENV="RSA_PRIVATE_KEY"
+    export RSA_PRIVATE_KEY="$PRIVATE_KEY_CONTENT"
+    echo "    使用 RSA 私钥文件: $PRIVATE_KEY_FILE"
 else
-    echo "    警告: 未找到密钥文件，使用测试密钥"
+    echo "    警告: 未找到 RSA 私钥文件，使用测试密钥"
     echo "    请先运行: python $SCRIPT_DIR/tools/generate_token.py --generate-key"
 fi
 
-# 启动服务（带或不带密钥）
-if [ -n "$TOKEN_KEY_ENV" ]; then
-    nohup env "$TOKEN_KEY_ENV" python main.py > /tmp/mcp_remote.log 2>&1 &
-else
-    nohup python main.py > /tmp/mcp_remote.log 2>&1 &
-fi
+# 启动服务
+nohup python main.py > /tmp/mcp_remote.log 2>&1 &
 REMOTE_PID=$!
 echo "    PID: $REMOTE_PID"
 
