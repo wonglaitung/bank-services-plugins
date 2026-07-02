@@ -45,9 +45,10 @@ prototype/
 │   └── requirements.txt
 └── tools/                   # 工具
     ├── generate_token.py    # Token 生成工具
-    ├── .token_key           # 密钥文件
+    ├── private_key.pem      # RSA 私钥（权限 600，用于解密 Token）
+    ├── public_key.pem       # RSA 公钥（用于加密 Token）
     ├── token_records.json   # Token 清单
-    └── revoked_tokens.json  # 吊销黑名单
+    └── revoked_tokens.json  # 吊销黑名单（动态生成）
 ```
 
 ## 快速开始
@@ -69,6 +70,11 @@ python tools/generate_token.py --show-private-key
 # 生成 Token 对（Refresh Token 有效 7 天）
 python tools/generate_token.py --user-id 000000001 --refresh-expires 7
 # 输出: MCP_REFRESH_TOKEN=xxx
+
+# 解密 Token 查看内容（调试用）
+python tools/generate_token.py --decrypt "<token>"
+# 或从文件读取
+python tools/generate_token.py --decrypt-file /path/to/token.txt
 ```
 
 ### 2. 启动服务

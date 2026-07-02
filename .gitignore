@@ -57,3 +57,12 @@ Thumbs.db
 # RSA private keys (DO NOT COMMIT)
 prototype/tools/private_key.pem
 *.private.pem
+
+# MCP sensitive files (DO NOT COMMIT)
+.mcp.json
+prototype/tools/token_records.json
+prototype/tools/public_key.pem
+prototype/tools/revoked_tokens.json
+
+# Log files
+*.log

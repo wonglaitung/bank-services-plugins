@@ -223,10 +223,18 @@ def decrypt_token(token_b64: str) -> dict:
         if not RSA_PRIVATE_KEY:
             raise ValueError("服务未配置 RSA 私钥")
 
-        # 1. Base64 解码
+        # 1. 清理 Token 字符串
+        token_b64 = token_b64.strip()
+
+        # 2. 补齐 Base64 padding（如果需要）
+        padding_needed = 4 - (len(token_b64) % 4)
+        if padding_needed != 4:
+            token_b64 += '=' * padding_needed
+
+        # 3. Base64 解码
         ciphertext = base64.b64decode(token_b64)
 
-        # 2. RSA-OAEP 解密
+        # 4. RSA-OAEP 解密
         plaintext = RSA_PRIVATE_KEY.decrypt(
             ciphertext,
             padding.OAEP(
@@ -236,14 +244,14 @@ def decrypt_token(token_b64: str) -> dict:
             )
         )
 
-        # 3. 解析 JSON
+        # 5. 解析 JSON
         token_data = json.loads(plaintext.decode('utf-8'))
 
-        # 4. 验证必要字段
+        # 6. 验证必要字段
         if 'user_id' not in token_data or 'expires_at' not in token_data:
             raise ValueError("Token 缺少必要字段")
 
-        # 5. 验证有效期
+        # 7. 验证有效期
         expires_at_str = token_data['expires_at']
         expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
         if datetime.now(timezone.utc) > expires_at:
@@ -251,9 +259,9 @@ def decrypt_token(token_b64: str) -> dict:
 
         return token_data
 
+    except ValueError:
+        raise
     except Exception as e:
-        if isinstance(e, ValueError):
-            raise
         raise ValueError(f"Token 解密失败: {str(e)}")
 
 

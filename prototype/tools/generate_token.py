@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Token 生成工具
+Token 生成与解密工具
 
-用于生成 Access Token 和 Refresh Token 对。
+用于生成 Access Token 和 Refresh Token 对，以及解密 Token 查看内容。
 - Access Token: 15 分钟有效期，用于 API 调用
 - Refresh Token: 可配置有效期（默认 7 天），用于获取新 Access Token
 
@@ -19,6 +19,10 @@ Token 生成工具
 
     # 查看私钥（用于远端服务）
     python generate_token.py --show-private-key
+
+    # 解密 Token 查看内容
+    python generate_token.py --decrypt <token>
+    python generate_token.py --decrypt-file /path/to/token.txt
 """
 
 import os
@@ -184,8 +188,92 @@ def save_token_records(records: list):
     os.chmod(TOKEN_RECORDS_FILE, 0o600)
 
 
+def decrypt_token(token_b64: str, private_key) -> dict:
+    """
+    解密 Token 获取内容
+
+    Args:
+        token_b64: Base64 编码的加密 Token
+        private_key: RSA 私钥
+
+    Returns:
+        包含 user_id, token_type, jti, expires_at, issued_at 的字典
+
+    Raises:
+        ValueError: Token 无效或解密失败
+    """
+    try:
+        # 1. 清理 Token 字符串
+        token_b64 = token_b64.strip()
+
+        # 2. 补齐 Base64 padding（如果需要）
+        padding_needed = 4 - (len(token_b64) % 4)
+        if padding_needed != 4:
+            token_b64 += '=' * padding_needed
+
+        # 3. Base64 解码
+        ciphertext = base64.b64decode(token_b64)
+
+        # 4. RSA-OAEP 解密
+        plaintext = private_key.decrypt(
+            ciphertext,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+
+        # 5. 解析 JSON
+        token_data = json.loads(plaintext.decode('utf-8'))
+
+        return token_data
+
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Token 解密失败: {str(e)}")
+
+
+def print_token_info(token_data: dict):
+    """打印 Token 信息"""
+    print("=" * 50)
+    print("Token 内容:")
+    print("=" * 50)
+    print(f"  用户编号:   {token_data.get('user_id', 'N/A')}")
+    print(f"  Token 类型: {token_data.get('token_type', 'N/A')}")
+    print(f"  Token ID:   {token_data.get('jti', 'N/A')}")
+    print(f"  签发时间:   {token_data.get('issued_at', 'N/A')}")
+    print(f"  过期时间:   {token_data.get('expires_at', 'N/A')}")
+    print("=" * 50)
+
+    # 检查有效期
+    if 'expires_at' in token_data:
+        expires_at_str = token_data['expires_at']
+        try:
+            expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+
+            if now > expires_at:
+                print("  状态: ❌ 已过期")
+            else:
+                remaining = expires_at - now
+                if remaining.days > 0:
+                    print(f"  状态: ✅ 有效 (剩余 {remaining.days} 天 {remaining.seconds // 3600} 小时)")
+                else:
+                    hours = remaining.seconds // 3600
+                    minutes = (remaining.seconds % 3600) // 60
+                    print(f"  状态: ✅ 有效 (剩余 {hours} 小时 {minutes} 分钟)")
+        except Exception:
+            print("  状态: ⚠️ 无法解析过期时间")
+
+    print()
+    print("完整 JSON:")
+    print(json.dumps(token_data, indent=2, ensure_ascii=False))
+
+
 def main():
-    parser = argparse.ArgumentParser(description='生成 Access Token 和 Refresh Token')
+    parser = argparse.ArgumentParser(description='生成 Access Token 和 Refresh Token，以及解密 Token')
     parser.add_argument('--generate-key', action='store_true',
                         help='生成新的 RSA-2048 密钥对并保存')
     parser.add_argument('--user-id', type=str,
@@ -196,6 +284,10 @@ def main():
                         help='显示当前公钥（PEM 格式）')
     parser.add_argument('--show-private-key', action='store_true',
                         help='显示当前私钥（PEM 格式）')
+    parser.add_argument('--decrypt', type=str, metavar='TOKEN',
+                        help='解密 Token 并显示内容')
+    parser.add_argument('--decrypt-file', type=str, metavar='FILE',
+                        help='从文件读取 Token 并解密')
 
     args = parser.parse_args()
 
@@ -272,6 +364,30 @@ def main():
         print()
         print("# 将此 Refresh Token 配置到 .mcp.json 的 env 中:")
         print('# "MCP_REFRESH_TOKEN": "<Refresh Token>"')
+
+        return
+
+    if args.decrypt or args.decrypt_file:
+        # 解密 Token
+        private_key = load_private_key()
+
+        if args.decrypt_file:
+            # 从文件读取 Token
+            with open(args.decrypt_file, 'r') as f:
+                token_b64 = f.read().strip()
+        else:
+            token_b64 = args.decrypt.strip()
+
+        # 移除可能的前缀 (如 "MCP_REFRESH_TOKEN=")
+        if '=' in token_b64:
+            token_b64 = token_b64.split('=', 1)[1]
+
+        try:
+            token_data = decrypt_token(token_b64, private_key)
+            print_token_info(token_data)
+        except ValueError as e:
+            print(f"错误: {e}")
+            sys.exit(1)
 
         return
 
