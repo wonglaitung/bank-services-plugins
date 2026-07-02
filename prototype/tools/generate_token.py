@@ -379,8 +379,9 @@ def main():
             token_b64 = args.decrypt.strip()
 
         # 移除可能的前缀 (如 "MCP_REFRESH_TOKEN=")
-        if '=' in token_b64:
-            token_b64 = token_b64.split('=', 1)[1]
+        # 注意：Base64 padding 也使用 '='，所以只处理明确的前缀格式
+        if token_b64.startswith('MCP_REFRESH_TOKEN='):
+            token_b64 = token_b64[len('MCP_REFRESH_TOKEN='):]
 
         try:
             token_data = decrypt_token(token_b64, private_key)
